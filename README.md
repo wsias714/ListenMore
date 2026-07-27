@@ -20,9 +20,15 @@ pre-mortems). See `docs/spec.md` for the evidence and design behind it.
 - **Weekly review** — picks a book biased toward least-recently-reviewed,
   asks you to recall its core idea from memory before revealing your notes,
   then rotates through Apply / Synthesize / Update prompts.
+- **Reading stats** — at the top of the Review view: books logged, unique
+  authors, this quarter's count, books finished per quarter over time, and
+  top genres/authors by frequency.
 - **Export** — the library index as CSV (drop into a Claude Project as
   low-token context for cross-book synthesis), full notes as Markdown, or a
   full JSON backup you can restore later.
+- **Starter library** — "Load starter library" (empty state or library
+  footer) seeds the app from `public/seed/listening-log-seed.json`, matched
+  by book `id` so it's safe to run again without creating duplicates.
 
 Data is stored locally in your browser (`localStorage`) — nothing leaves
 your machine unless you export it yourself.

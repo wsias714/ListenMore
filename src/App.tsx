@@ -3,8 +3,10 @@ import { C, STEPS, display, body, mono, REVIEW_DUE_DAYS, PROMPTS } from "./const
 import { blankBook, daysSince, fmt, lastReviewDate, today } from "./lib/utils";
 import { loadBooks, saveBooks } from "./lib/storage";
 import { exportCSV, exportJSON, exportMD, importJSON } from "./lib/exports";
+import { fetchSeedBooks } from "./lib/seed";
 import { Btn, Field, Input, Label, Stars, ThemePicker } from "./components/atoms";
 import { Spectrum, Ticks } from "./components/Spectrum";
+import { ReadingStats } from "./components/ReadingStats";
 import type { Book, ReflectionDepth } from "./types";
 
 type View = "library" | "quick" | "wizard" | "review";
@@ -118,6 +120,19 @@ export default function App() {
     e.target.value = "";
   };
 
+  const loadStarterLibrary = () => {
+    fetchSeedBooks()
+      .then((seed) => {
+        setBooks((prev) => {
+          const byId = new Map(prev.map((b) => [b.id, b]));
+          for (const b of seed) byId.set(b.id, b);
+          return [...byId.values()];
+        });
+        flash(`Loaded ${seed.length} starter books.`);
+      })
+      .catch((err: Error) => flash(err.message));
+  };
+
   /* ---------- wizard ---------- */
 
   const set =
@@ -209,6 +224,9 @@ export default function App() {
               <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
                 <Btn kind="solid" onClick={() => openWizard(null, "quick")}>Quick add a finished book</Btn>
                 <Btn onClick={() => openWizard(null, "full")}>Full reflection</Btn>
+              </div>
+              <div style={{ marginTop: 14 }}>
+                <Btn kind="quiet" onClick={loadStarterLibrary}>Or load your starter library (16 books)</Btn>
               </div>
             </div>
           ) : (
@@ -302,6 +320,7 @@ export default function App() {
                 <Btn onClick={() => exportCSV(books)}>Export index (CSV)</Btn>
                 <Btn onClick={() => exportMD(books)}>Export notes (Markdown)</Btn>
                 <Btn kind="quiet" onClick={() => exportJSON(books)}>Back up</Btn>
+                <Btn kind="quiet" onClick={loadStarterLibrary}>Load starter library</Btn>
                 <label
                   style={{
                     font: `600 13px/1 ${body}`, color: C.muted, padding: "11px 16px",
@@ -638,7 +657,12 @@ export default function App() {
           return (
             <div style={{ ...wrap, paddingTop: 26 }}>
               <Btn kind="quiet" onClick={() => setView("library")}>← Library</Btn>
-              <div style={{ ...card, marginTop: 14 }}>
+
+              <div style={{ ...card, marginTop: 14, marginBottom: 14 }}>
+                <ReadingStats books={books} />
+              </div>
+
+              <div style={{ ...card }}>
                 <div style={{ font: `400 11px/1 ${mono}`, color: C.amber, letterSpacing: ".1em" }}>THIS WEEK'S BOOK</div>
                 <div style={{ font: `800 30px/1.15 ${display}`, letterSpacing: "-.025em", margin: "8px 0 2px" }}>{b.title}</div>
                 <div style={{ color: C.muted }}>
