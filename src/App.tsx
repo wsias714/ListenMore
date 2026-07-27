@@ -146,15 +146,18 @@ export default function App() {
 
   const shell: React.CSSProperties = {
     minHeight: "100vh", background: C.bg, color: C.text, font: `400 16px/1.6 ${body}`,
-    padding: "0 0 80px",
+    padding: "0 0 calc(80px + env(safe-area-inset-bottom, 0px))",
   };
-  const wrap: React.CSSProperties = { maxWidth: 780, margin: "0 auto", padding: "0 20px" };
+  const wrap: React.CSSProperties = {
+    maxWidth: 780, margin: "0 auto",
+    padding: "0 max(20px, env(safe-area-inset-right, 0px)) 0 max(20px, env(safe-area-inset-left, 0px))",
+  };
   const card: React.CSSProperties = { background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: 18 };
 
   return (
     <div style={shell}>
       {/* header */}
-      <div style={{ borderBottom: `1px solid ${C.line}`, background: C.bg, position: "sticky", top: 0, zIndex: 10 }}>
+      <div className="safe-top" style={{ borderBottom: `1px solid ${C.line}`, background: C.bg, position: "sticky", top: 0, zIndex: 10 }}>
         <div style={{ ...wrap, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px" }}>
           <button
             onClick={() => {
@@ -180,6 +183,7 @@ export default function App() {
 
       {toast && (
         <div
+          className="safe-bottom"
           style={{
             position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 50,
             background: C.surfaceHi, border: `1px solid ${C.accent}`, color: C.text,

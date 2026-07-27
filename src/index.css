@@ -12,3 +12,12 @@ html, body, #root {
 body {
   color-scheme: dark;
 }
+
+/* iOS standalone (Add to Home Screen) draws under the notch/status bar and
+   home indicator, so the app content needs to pad around them itself. */
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}

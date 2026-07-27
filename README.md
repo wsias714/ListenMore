@@ -27,6 +27,22 @@ pre-mortems). See `docs/spec.md` for the evidence and design behind it.
 Data is stored locally in your browser (`localStorage`) — nothing leaves
 your machine unless you export it yourself.
 
+## Installing on iPhone (Add to Home Screen)
+
+This is a PWA — it installs straight from Safari, no App Store or Apple
+Developer account needed:
+
+1. Open the app's URL in **Safari** on your iPhone (must be Safari, not
+   Chrome — iOS only allows installing from Safari).
+2. Tap the **Share** icon (square with an arrow) in the toolbar.
+3. Scroll down and tap **Add to Home Screen**, then **Add**.
+4. Launch it from the home screen icon — it opens full-screen, no browser
+   chrome, and works offline after the first load.
+
+Because it's a home-screen web app, data stays local to that installation —
+if you reinstall or switch devices, use **Back up** / **Restore** (JSON) in
+the library footer to move your data over.
+
 ## Getting started
 
 ```bash
