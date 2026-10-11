@@ -1,5 +1,5 @@
 [Unit]
-Description=ListenMore nightly: draft reflections from listening notes + weekly book insights
+Description=ListenMore weekly: draft reflections from listening notes + weekly book insights
 After=network-online.target rclone-dropbox.service
 Wants=network-online.target
 OnFailure=listenmore-drafts-notify-failure.service

@@ -1,8 +1,8 @@
 [Unit]
-Description=ListenMore nightly drafts at 02:30
+Description=ListenMore weekly drafts, Saturday 02:30
 
 [Timer]
-OnCalendar=*-*-* 02:30:00
+OnCalendar=Sat *-*-* 02:30:00
 Persistent=true
 
 [Install]

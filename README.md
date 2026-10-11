@@ -33,7 +33,7 @@ pre-mortems). See `docs/spec.md` for the evidence and design behind it.
 - **Capture while listening** — a one-tap *Note* button (typed or iOS
   dictation) logs timestamped notes against the book you're listening to;
   an iPhone Shortcut can add notes from the Action button. Marking a book
-  *Finished* queues it for a nightly desktop job that drafts the
+  *Finished* queues it for a weekly desktop job that drafts the
   reflection from your notes; you recall the core idea first, then edit
   and accept. See `docs/capture-and-sync.md`.
 - **Dropbox sync** — optional. Connect Dropbox (OAuth PKCE, no server,

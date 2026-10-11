@@ -114,7 +114,7 @@ export default function App() {
       // Shortcut notes must not keep landing on a book that's done.
       return next.currentBookId === id ? withCurrent(next, next.books.find((b) => b.status === "listening")?.id ?? null) : next;
     });
-    flash("Finished. A draft reflection will be ready after tonight's run.");
+    flash("Finished. A draft reflection will be ready after the Saturday 02:30 run.");
   };
 
   const filtered = useMemo(() => {

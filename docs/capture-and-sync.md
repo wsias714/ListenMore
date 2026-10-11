@@ -58,13 +58,13 @@ Open the home-screen app → tap the sync label at top right ("sync off") → pa
   Tap the keyboard's mic to dictate (iOS dictation; the Web Speech API is not used: it is
   unreliable in home-screen web apps). Pick the book or start a new one inline.
 - **Listening now** cards: `+ Note` and `Finished`. Finishing sets the date and queues the
-  book for tonight's draft.
+  book for the next weekly run.
 - **Shortcut:** see Settings → Dropbox sync → "iPhone Shortcut". Notes land on the book you
   last captured to (the "current" book); if none is current they wait as loose notes.
 
-## Nightly job (desktop)
+## Weekly job (desktop)
 
-`desktop/` — systemd user timer `listenmore-drafts.timer`, 02:30 daily (`Persistent=true`).
+`desktop/` — systemd user timer `listenmore-drafts.timer`, Saturday 02:30 (`Persistent=true`, catches up if the machine was off).
 Install/refresh: `desktop/install.sh`. Logs: `~/.local/state/listenmore/jobs.log`.
 
 - `draft_job.py`: for books that are finished, have notes, and no accepted/self-written
