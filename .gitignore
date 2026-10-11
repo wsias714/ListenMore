@@ -23,3 +23,5 @@ dist-artifact
 *.njsproj
 *.sln
 *.sw?
+.local/
+__pycache__/

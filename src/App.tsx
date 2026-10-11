@@ -1,19 +1,26 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { C, STEPS, display, body, mono, REVIEW_DUE_DAYS, PROMPTS } from "./constants";
 import { blankBook, daysSince, fmt, lastReviewDate, today } from "./lib/utils";
-import { loadBooks, saveBooks } from "./lib/storage";
+import { loadLibrary, saveLibrary } from "./lib/storage";
+import { fmtStamp, isListening, newNote, readyDrafts, withBooks, withCurrent } from "./lib/library";
+import { useSync } from "./lib/useSync";
+import { NoteSheet } from "./components/NoteSheet";
+import { DraftReview } from "./components/DraftReview";
+import { SettingsView } from "./components/SettingsView";
 import { exportCSV, exportJSON, exportMD, importJSON } from "./lib/exports";
 import { fetchSeedBooks } from "./lib/seed";
 import { Btn, Field, Input, Label, Stars, ThemePicker } from "./components/atoms";
 import { Spectrum, Ticks } from "./components/Spectrum";
 import { ReadingStats } from "./components/ReadingStats";
-import type { Book, ReflectionDepth } from "./types";
+import type { Book, LibraryData, ReflectionDepth } from "./types";
 
-type View = "library" | "quick" | "wizard" | "review";
+type View = "library" | "quick" | "wizard" | "review" | "settings" | "draft";
 type SaveState = "idle" | "saving" | "saved" | "error";
 
 export default function App() {
-  const [books, setBooks] = useState<Book[]>(() => loadBooks());
+  const [lib, setLib] = useState<LibraryData>(() => loadLibrary());
+  const books = lib.books;
+  const setBooks = useCallback((f: (prev: Book[]) => Book[]) => setLib((l) => withBooks(l, f(l.books))), []);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [view, setView] = useState<View>("library");
   const [draft, setDraft] = useState<Book | null>(null);
@@ -25,6 +32,8 @@ export default function App() {
   const [revealed, setRevealed] = useState(false);
   const [reviewNote, setReviewNote] = useState("");
   const [toast, setToast] = useState("");
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [draftBookId, setDraftBookId] = useState<string | null>(null);
   const firstRun = useRef(true);
 
   /* persist on change */
@@ -35,19 +44,21 @@ export default function App() {
     }
     setSaveState("saving");
     try {
-      saveBooks(books);
+      saveLibrary(lib);
       setSaveState("saved");
       const t = setTimeout(() => setSaveState("idle"), 1200);
       return () => clearTimeout(t);
     } catch {
       setSaveState("error");
     }
-  }, [books]);
+  }, [lib]);
 
-  const flash = (m: string) => {
+  const flash = useCallback((m: string) => {
     setToast(m);
     setTimeout(() => setToast(""), 2200);
-  };
+  }, []);
+
+  const sync = useSync(lib, setLib, flash);
 
   const upsert = (b: Book) =>
     setBooks((prev) => {
@@ -61,10 +72,54 @@ export default function App() {
   const remove = (id: string) => setBooks((prev) => prev.filter((b) => b.id !== id));
 
   const active = books.find((b) => b.id === activeId) ?? null;
+  const listening = useMemo(() => books.filter(isListening), [books]);
+  const finishedBooks = useMemo(() => books.filter((b) => !isListening(b)), [books]);
+  const drafted = readyDrafts(books, sync.drafts);
+  const draftBook = books.find((b) => b.id === draftBookId) ?? null;
+  const bookDraft = draftBook && sync.drafts ? sync.drafts.drafts[draftBook.id] : null;
+
+  /* ---------- capture while listening ---------- */
+
+  const startBook = (title: string): string => {
+    const b = { ...blankBook(), title, depth: "quick" as const, status: "listening" as const, dateFinished: "" };
+    setLib((l) => withCurrent(withBooks(l, [...l.books, b]), b.id));
+    return b.id;
+  };
+
+  const addNote = (bookId: string, text: string) => {
+    const n = newNote(text);
+    setLib((l) =>
+      withCurrent(withBooks(l, l.books.map((b) => (b.id === bookId ? { ...b, notes: [...(b.notes ?? []), n] } : b))), bookId),
+    );
+    flash("Noted.");
+  };
+
+  const attachLoose = (noteId: string, bookId: string) =>
+    setLib((l) => {
+      const n = l.looseNotes?.find((x) => x.id === noteId);
+      if (!n) return l;
+      const next = withBooks(l, l.books.map((b) => (b.id === bookId ? { ...b, notes: [...(b.notes ?? []), n] } : b)));
+      const rest = (l.looseNotes ?? []).filter((x) => x.id !== noteId);
+      return { ...next, looseNotes: rest.length ? rest : undefined };
+    });
+
+  const markFinished = (id: string) => {
+    setLib((l) => {
+      const next = withBooks(
+        l,
+        l.books.map((b) =>
+          b.id === id ? { ...b, status: "finished" as const, dateFinished: today(), finishedAt: new Date().toISOString() } : b,
+        ),
+      );
+      // Shortcut notes must not keep landing on a book that's done.
+      return next.currentBookId === id ? withCurrent(next, next.books.find((b) => b.status === "listening")?.id ?? null) : next;
+    });
+    flash("Finished. A draft reflection will be ready after tonight's run.");
+  };
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return books
+    return finishedBooks
       .filter((b) => !themeFilter || b.themes.includes(themeFilter))
       .filter(
         (b) =>
@@ -75,17 +130,17 @@ export default function App() {
             .includes(q),
       )
       .sort((a, b) => (a.dateFinished < b.dateFinished ? 1 : -1));
-  }, [books, query, themeFilter]);
+  }, [finishedBooks, query, themeFilter]);
 
-  const dueCount = books.filter((b) => {
+  const dueCount = finishedBooks.filter((b) => {
     const age = daysSince(lastReviewDate(b));
     return age === null || age > REVIEW_DUE_DAYS;
   }).length;
 
   /* weighted pick: oldest-reviewed half, then random */
   const startReview = () => {
-    if (!books.length) return flash("Add a book first.");
-    const ranked = [...books].sort((a, b) => {
+    if (!finishedBooks.length) return flash("Add a finished book first.");
+    const ranked = [...finishedBooks].sort((a, b) => {
       const la = lastReviewDate(a) ?? "0000";
       const lb = lastReviewDate(b) ?? "0000";
       return la < lb ? -1 : 1;
@@ -113,7 +168,13 @@ export default function App() {
     if (!f) return;
     importJSON(f)
       .then((imported) => {
-        setBooks(imported);
+        // Restore brings books back (and wins over older copies); it never deletes what's here.
+        const now = new Date().toISOString();
+        setBooks((prev) => {
+          const byId = new Map(prev.map((b) => [b.id, b]));
+          for (const b of imported) byId.set(b.id, { ...b, updated: now });
+          return [...byId.values()];
+        });
         flash(`Restored ${imported.length} books.`);
       })
       .catch((err: Error) => flash(err.message));
@@ -183,13 +244,26 @@ export default function App() {
           >
             <div style={{ font: `800 20px/1 ${display}`, color: C.text, letterSpacing: "-.02em" }}>Listening Log</div>
             <div style={{ font: `400 11px/1.4 ${mono}`, color: C.faint, letterSpacing: ".1em", marginTop: 3 }}>
-              {books.length} BOOKS · {dueCount} DUE
+              {finishedBooks.length} BOOKS · {dueCount} DUE
             </div>
           </button>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ font: `400 11px/1 ${mono}`, color: saveState === "error" ? C.rose : C.faint }}>
-              {saveState === "saving" ? "saving" : saveState === "saved" ? "saved" : saveState === "error" ? "save failed" : ""}
-            </span>
+            <button
+              onClick={() => setView("settings")}
+              title="Dropbox sync"
+              style={{
+                background: "none", border: "none", cursor: "pointer", padding: "4px 2px", font: `400 11px/1 ${mono}`,
+                color: saveState === "error" || sync.state === "error" ? C.rose : sync.state === "offline" ? C.amber : C.faint,
+              }}
+            >
+              {saveState === "error" ? "save failed"
+                : sync.state === "syncing" ? "syncing"
+                : sync.state === "error" ? "sync error"
+                : sync.state === "offline" ? "offline"
+                : sync.state === "off" ? "sync off"
+                : saveState === "saving" ? "saving"
+                : "synced"}
+            </button>
             <Btn onClick={startReview}>Review</Btn>
             <Btn kind="solid" onClick={() => openWizard(null, "full")}>+ Book</Btn>
           </div>
@@ -212,7 +286,82 @@ export default function App() {
       {/* ------------------------------ LIBRARY ------------------------------ */}
       {view === "library" && !active && (
         <div style={{ ...wrap, paddingTop: 26 }}>
-          {books.length === 0 ? (
+          {drafted.length > 0 && (
+            <div style={{ display: "grid", gap: 8, marginBottom: 18 }}>
+              {drafted.map((b) => (
+                <button
+                  key={b.id}
+                  onClick={() => {
+                    setDraftBookId(b.id);
+                    setView("draft");
+                  }}
+                  style={{ ...card, textAlign: "left", cursor: "pointer", width: "100%", borderColor: C.amber }}
+                >
+                  <span style={{ font: `600 11px/1 ${mono}`, color: C.amber, letterSpacing: ".1em" }}>DRAFT READY</span>
+                  <div style={{ font: `700 17px/1.3 ${display}`, marginTop: 6 }}>{b.title}</div>
+                  <div style={{ color: C.muted, font: `400 13px/1.4 ${body}` }}>Recall the core idea, then review the draft.</div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {(lib.looseNotes?.length ?? 0) > 0 && (
+            <div style={{ ...card, marginBottom: 18, borderColor: C.amber }}>
+              <div style={{ font: `600 11px/1 ${mono}`, color: C.amber, letterSpacing: ".1em" }}>
+                {lib.looseNotes!.length} NOTE{lib.looseNotes!.length === 1 ? "" : "S"} WAITING FOR A BOOK
+              </div>
+              {lib.looseNotes!.map((n) => (
+                <div key={n.id} style={{ marginTop: 10 }}>
+                  <div style={{ font: `600 11px/1 ${mono}`, color: C.accent }}>{fmtStamp(n.ts)}</div>
+                  <div style={{ margin: "4px 0 6px", whiteSpace: "pre-wrap" }}>{n.text}</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {(listening.length ? listening : finishedBooks.slice(-3)).map((b) => (
+                      <Btn key={b.id} onClick={() => attachLoose(n.id, b.id)}>Add to {b.title}</Btn>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ marginBottom: 22 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ font: `600 11px/1 ${mono}`, color: C.accent, letterSpacing: ".1em" }}>LISTENING NOW</div>
+              <Btn kind="quiet" onClick={() => setNoteOpen(true)}>+ Start a book</Btn>
+            </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              {listening.map((b) => {
+                const notes = b.notes ?? [];
+                const last = notes[notes.length - 1];
+                return (
+                  <div key={b.id} style={card}>
+                    <button
+                      onClick={() => setActiveId(b.id)}
+                      style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", width: "100%" }}
+                    >
+                      <div style={{ font: `700 18px/1.25 ${display}`, color: C.text }}>{b.title}</div>
+                      <div style={{ font: `400 13px/1.4 ${body}`, color: C.muted, marginTop: 2 }}>
+                        {notes.length} note{notes.length === 1 ? "" : "s"}
+                        {last ? ` · last ${fmtStamp(last.ts)}` : ""}
+                      </div>
+                      {last && <div style={{ color: C.muted, font: `400 14px/1.5 ${body}`, marginTop: 8 }}>“{last.text.slice(0, 140)}”</div>}
+                    </button>
+                    <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                      <Btn kind="solid" onClick={() => { setLib((l) => withCurrent(l, b.id)); setNoteOpen(true); }}>+ Note</Btn>
+                      <Btn onClick={() => markFinished(b.id)}>Finished</Btn>
+                    </div>
+                  </div>
+                );
+              })}
+              {listening.length === 0 && (
+                <div style={{ ...card, color: C.muted }}>
+                  Nothing in progress. Tap <b>Note</b> (bottom right) to start a book and jot a thought as you listen.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {finishedBooks.length === 0 && listening.length === 0 ? (
             <div style={{ ...card, textAlign: "center", padding: "48px 24px" }}>
               <div style={{ font: `700 26px/1.2 ${display}`, marginBottom: 10, letterSpacing: "-.02em" }}>
                 Nothing logged yet.
@@ -231,7 +380,7 @@ export default function App() {
             </div>
           ) : (
             <>
-              <Spectrum books={books} onPick={setActiveId} activeId={activeId} />
+              <Spectrum books={finishedBooks} onPick={setActiveId} activeId={activeId} />
               <div
                 style={{
                   display: "flex", justifyContent: "space-between", font: `400 11px/1 ${mono}`,
@@ -317,9 +466,10 @@ export default function App() {
               </div>
 
               <div style={{ marginTop: 34, paddingTop: 20, borderTop: `1px solid ${C.line}`, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <Btn onClick={() => exportCSV(books)}>Export index (CSV)</Btn>
+                <Btn onClick={() => exportCSV(finishedBooks)}>Export index (CSV)</Btn>
                 <Btn onClick={() => exportMD(books)}>Export notes (Markdown)</Btn>
-                <Btn kind="quiet" onClick={() => exportJSON(books)}>Back up</Btn>
+                <Btn kind="quiet" onClick={() => exportJSON(lib)}>Back up</Btn>
+                <Btn kind="quiet" onClick={() => setView("settings")}>Dropbox &amp; Shortcut</Btn>
                 <Btn kind="quiet" onClick={loadStarterLibrary}>Load starter library</Btn>
                 <label
                   style={{
@@ -343,7 +493,8 @@ export default function App() {
           <div style={{ ...card, marginTop: 14 }}>
             <div style={{ font: `800 28px/1.15 ${display}`, letterSpacing: "-.025em" }}>{active.title}</div>
             <div style={{ color: C.muted, marginTop: 4 }}>
-              {active.author} · finished {fmt(active.dateFinished)} · reviewed {active.reviews.length}×
+              {active.author ? `${active.author} · ` : ""}
+              {isListening(active) ? "listening now" : `finished ${fmt(active.dateFinished)} · reviewed ${active.reviews.length}×`}
             </div>
             <div style={{ display: "flex", gap: 20, marginTop: 14, font: `400 12px/1 ${mono}`, color: C.faint }}>
               <span>APPLICABILITY {active.applicability}/5</span>
@@ -376,6 +527,20 @@ export default function App() {
                 </div>
               ))}
 
+            {(active.notes?.length ?? 0) > 0 && (
+              <div style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${C.line}` }}>
+                <Label>Notes while listening</Label>
+                {active.notes!.map((n) => (
+                  <div key={n.id} style={{ marginTop: 10, font: `400 14px/1.5 ${body}` }}>
+                    <span style={{ font: `600 11px/1 ${mono}`, color: C.accent }}>
+                      {fmtStamp(n.ts)}{n.src === "shortcut" ? " · shortcut" : ""}
+                    </span>
+                    <div style={{ color: C.text, whiteSpace: "pre-wrap" }}>{n.text}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {active.reviews.length > 0 && (
               <div style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${C.line}` }}>
                 <Label>Review log</Label>
@@ -391,7 +556,14 @@ export default function App() {
             )}
 
             <div style={{ display: "flex", gap: 8, marginTop: 24, flexWrap: "wrap" }}>
-              <Btn kind="solid" onClick={() => openWizard(active, "full")}>Edit reflection</Btn>
+              {isListening(active) ? (
+                <>
+                  <Btn kind="solid" onClick={() => { setLib((l) => withCurrent(l, active.id)); setNoteOpen(true); }}>+ Note</Btn>
+                  <Btn onClick={() => { markFinished(active.id); setActiveId(null); }}>Finished</Btn>
+                </>
+              ) : (
+                <Btn kind="solid" onClick={() => openWizard(active, "full")}>Edit reflection</Btn>
+              )}
               <Btn
                 kind="warn"
                 onClick={() => {
@@ -723,6 +895,53 @@ export default function App() {
             </div>
           );
         })()}
+
+      {/* ------------------------------ SETTINGS / DRAFT ------------------------------ */}
+      {view === "settings" && (
+        <div style={wrap}>
+          <SettingsView sync={sync} onBack={() => setView("library")} flash={flash} />
+        </div>
+      )}
+
+      {view === "draft" && draftBook && bookDraft && (
+        <div style={wrap}>
+          <DraftReview
+            key={bookDraft.id}
+            book={draftBook}
+            draft={bookDraft}
+            onCancel={() => setView("library")}
+            onAccept={(b) => {
+              upsert(b);
+              setView("library");
+              flash("Reflection saved.");
+            }}
+          />
+        </div>
+      )}
+
+      {/* ------------------------------ ONE-TAP NOTE ------------------------------ */}
+      {view === "library" && !noteOpen && (
+        <button
+          onClick={() => setNoteOpen(true)}
+          className="safe-bottom"
+          style={{
+            position: "fixed", right: 20, bottom: "calc(24px + env(safe-area-inset-bottom, 0px))", zIndex: 40,
+            background: C.accent, color: "#0C1116", border: "none", borderRadius: 28, padding: "16px 22px",
+            font: `700 15px/1 ${body}`, cursor: "pointer", boxShadow: "0 4px 16px rgba(0,0,0,.4)",
+          }}
+        >
+          ✎ Note
+        </button>
+      )}
+      {noteOpen && (
+        <NoteSheet
+          listening={listening}
+          currentId={lib.currentBookId ?? null}
+          onSave={addNote}
+          onStartBook={startBook}
+          onClose={() => setNoteOpen(false)}
+        />
+      )}
     </div>
   );
 }

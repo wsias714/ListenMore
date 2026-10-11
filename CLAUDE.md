@@ -47,3 +47,20 @@ Practical implications:
 
 This is scoped to what this specific sandboxed environment's network policy
 blocks; it may not apply in a different environment/session.
+
+## Capture, Dropbox sync and the desktop job (added 2026-10-11)
+
+Design and ownership rules are in `docs/capture-and-sync.md`; read it before touching
+sync or `desktop/`. Short version:
+
+- The app owns `library.json`; the desktop job owns `drafts.json`; the Shortcut only adds
+  files under `inbox/`. Never make two parties write the same file.
+- Sync logic is `src/lib/merge.ts` + `src/lib/remote.ts` (pure, tested with `npm test`);
+  `src/lib/dropbox.ts` is the thin SDK adapter. Keep merge non-destructive.
+- Run lint, typecheck/build (`npm run build`) and `npm test` before every push.
+- `desktop/` jobs: Claude **Haiku only** (guarded), via the signed-in `claude` CLI, no API
+  key in the repo or the website. They must skip-and-log when the rclone mount is missing.
+- The Dropbox app key is public under PKCE. Never add a secret.
+- `.local/` holds Wade's real phone backups: gitignored, never commit.
+- Bench reads the Saturday insights via `bench/src/book_insights.py`; keep the file format
+  (`for_day`, `lines`) stable.

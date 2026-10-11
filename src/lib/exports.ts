@@ -71,6 +71,9 @@ ${b.feynman}
 - IF ${b.ifSituation} THEN I will ${b.thenAction}
 - Pre-mortem: ${b.preMortem}
 
+## Notes while listening
+${(b.notes ?? []).map((n) => `- ${n.ts} · ${n.text.replace(/\n/g, " ")}`).join("\n") || "- none"}
+
 ## Review log
 ${b.reviews.map((r) => `- ${r.date} · ${r.type} · ${r.note || "(no note)"}`).join("\n") || "- none yet"}
 `,
@@ -79,8 +82,8 @@ ${b.reviews.map((r) => `- ${r.date} · ${r.type} · ${r.note || "(no note)"}`).j
   download("listening-log-notes.md", md, "text/markdown");
 }
 
-export function exportJSON(books: Book[]) {
-  download("listening-log-backup.json", JSON.stringify({ books } satisfies LibraryData, null, 2), "application/json");
+export function exportJSON(lib: LibraryData) {
+  download("listening-log-backup.json", JSON.stringify(lib, null, 2), "application/json");
 }
 
 export function importJSON(file: File): Promise<Book[]> {

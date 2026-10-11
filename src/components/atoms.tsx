@@ -75,7 +75,7 @@ export const Btn = ({
   disabled?: boolean;
 }) => {
   const base: React.CSSProperties = {
-    font: `600 13px/1 ${body}`, letterSpacing: ".01em", padding: "11px 16px",
+    font: `600 13px/1 ${body}`, letterSpacing: ".01em", padding: "11px 16px", whiteSpace: "nowrap",
     borderRadius: 6, cursor: disabled ? "not-allowed" : "pointer",
     opacity: disabled ? 0.4 : 1, transition: "background .15s, border-color .15s",
   };

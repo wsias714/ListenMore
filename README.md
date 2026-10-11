@@ -30,8 +30,18 @@ pre-mortems). See `docs/spec.md` for the evidence and design behind it.
   footer) seeds the app from `public/seed/listening-log-seed.json`, matched
   by book `id` so it's safe to run again without creating duplicates.
 
-Data is stored locally in your browser (`localStorage`) — nothing leaves
-your machine unless you export it yourself.
+- **Capture while listening** — a one-tap *Note* button (typed or iOS
+  dictation) logs timestamped notes against the book you're listening to;
+  an iPhone Shortcut can add notes from the Action button. Marking a book
+  *Finished* queues it for a nightly desktop job that drafts the
+  reflection from your notes; you recall the core idea first, then edit
+  and accept. See `docs/capture-and-sync.md`.
+- **Dropbox sync** — optional. Connect Dropbox (OAuth PKCE, no server,
+  scoped to `Apps/ListenMore/`) and the library syncs across devices;
+  `localStorage` stays as the offline cache.
+
+Without Dropbox, data is stored locally in your browser (`localStorage`) —
+nothing leaves your machine unless you export it yourself.
 
 ## Installing on iPhone (Add to Home Screen)
 
@@ -65,5 +75,5 @@ npm run preview
 
 ## Tech
 
-React + TypeScript + Vite, no backend, no external state library. All app
-state lives in `src/App.tsx`; data helpers are under `src/lib/`.
+React + TypeScript + Vite, no backend (Dropbox via its JS SDK, browser-only PKCE), no external state library. All app
+state lives in `src/App.tsx`; data helpers are under `src/lib/`. `npm test` runs the merge/sync tests. The nightly drafting job lives in `desktop/` (Python, systemd user timer).

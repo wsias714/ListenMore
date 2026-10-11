@@ -1,0 +1,6 @@
+[Unit]
+Description=Desktop notification when listenmore-drafts.service fails
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/notify-send --urgency=normal "ListenMore nightly failed" "Draft/insights job failed. See ~/.local/state/listenmore/jobs.log or: journalctl --user -u listenmore-drafts -n 50"
