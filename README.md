@@ -26,14 +26,13 @@ pre-mortems). See `docs/spec.md` for the evidence and design behind it.
 - **Export** — the library index as CSV (drop into a Claude Project as
   low-token context for cross-book synthesis), full notes as Markdown, or a
   full JSON backup you can restore later.
-- **Starter library** — "Load starter library" (empty state or library
-  footer) seeds the app from `public/seed/listening-log-seed.json`, matched
+- **Starter library** — "Load starter library" (Now when empty, or Settings → Data) seeds the app from `public/seed/listening-log-seed.json`, matched
   by book `id` so it's safe to run again without creating duplicates.
 
 - **Capture while listening** — a one-tap *Note* button (typed or iOS
   dictation) logs timestamped notes against the book you're listening to;
-  an iPhone Shortcut can add notes from the Action button. Marking a book
-  *Finished* queues it for a weekly desktop job that drafts the
+  an iPhone Shortcut (note / start a book / finished) works from the Action
+  button. Marking a book *Finished* queues it for a daily desktop check that drafts the
   reflection from your notes; you recall the core idea first, then edit
   and accept. See `docs/capture-and-sync.md`.
 - **Dropbox sync** — optional. Connect Dropbox (OAuth PKCE, no server,
@@ -76,4 +75,4 @@ npm run preview
 ## Tech
 
 React + TypeScript + Vite, no backend (Dropbox via its JS SDK, browser-only PKCE), no external state library. All app
-state lives in `src/App.tsx`; data helpers are under `src/lib/`. `npm test` runs the merge/sync tests. The nightly drafting job lives in `desktop/` (Python, systemd user timer).
+state and actions live in `src/App.tsx`, screens in `src/views/`; data helpers are under `src/lib/`. `npm test` runs the merge/sync tests. The daily drafting job lives in `desktop/` (Python, systemd user timer).

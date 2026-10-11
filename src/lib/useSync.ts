@@ -69,7 +69,13 @@ export function useSync(lib: LibraryData, setLib: Dispatch<SetStateAction<Librar
       } catch {
         /* drafts are optional; a bad drafts.json never blocks the library */
       }
-      if (res.inboxMerged) flash(`${res.inboxMerged} note${res.inboxMerged > 1 ? "s" : ""} from your Shortcut.`);
+      if (res.inboxMerged || res.inboxCommands) {
+        const cur = res.lib.books.find((b) => b.id === res.lib.currentBookId);
+        const bits = [];
+        if (res.inboxMerged) bits.push(`${res.inboxMerged} Shortcut note${res.inboxMerged > 1 ? "s" : ""}${cur ? ` on ${cur.title}` : ""}`);
+        if (res.inboxCommands) bits.push(`${res.inboxCommands} Shortcut action${res.inboxCommands > 1 ? "s" : ""} applied`);
+        flash(bits.join(", ") + ".");
+      }
       setLastSync(new Date().toISOString());
       setError("");
       setState("idle");

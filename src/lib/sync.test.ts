@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ConflictError, LIB_PATH, INBOX_DIR, parseInboxFile, syncLibrary } from "./remote.ts";
+import { ConflictError, LIB_PATH, INBOX_DIR, parseInboxFile, parseInboxItem, syncLibrary } from "./remote.ts";
+import { startBook } from "./library.ts";
 import type { Remote, RemoteEntry, RemoteFile } from "./remote.ts";
 import type { Book, LibraryData } from "../types.ts";
 
@@ -99,4 +100,56 @@ test("inbox parsing: filename timestamp, JSON body, empty file", () => {
   assert.equal(parseInboxFile("/inbox/x.json", '{"text":"yo","ts":"2026-01-02T03:04:05Z"}', "2026-05-05T00:00:00Z")!.ts, "2026-01-02T03:04:05.000Z");
   assert.equal(parseInboxFile("/inbox/x.txt", "   ", "2026-05-05T00:00:00Z"), null);
   assert.equal(parseInboxFile("/inbox/x.txt", "hello", "2026-05-05T00:00:00Z")!.ts, "2026-05-05T00:00:00.000Z");
+});
+
+const put = (r: FakeRemote, name: string, text: string) =>
+  r.files.set(`${INBOX_DIR}/${name}`, { text, rev: 1, modified: "2026-10-12T00:00:00Z" });
+const cmd = (c: string, extra: object = {}) => JSON.stringify({ cmd: c, ...extra });
+
+test("Shortcut start -> note -> finish run in order and finish the book that was started", async () => {
+  const r = new FakeRemote();
+  put(r, "2026-10-12T08-00-00-a.json", cmd("start", { title: "Thinking in Bets" }));
+  put(r, "2026-10-12T08-05-00-b.txt", "variance is not skill");
+  put(r, "2026-10-12T09-00-00-c.json", cmd("finish"));
+  const res = await syncLibrary(r, { books: [] });
+  const lib = saved(r);
+  assert.equal(lib.books.length, 1);
+  assert.equal(lib.books[0].title, "Thinking in Bets");
+  assert.equal(lib.books[0].status, "finished");
+  assert.equal(lib.books[0].notes!.length, 1);
+  assert.equal(lib.currentBookId, null);
+  assert.equal(res.inboxCommands, 2);
+});
+
+test("a leftover finish file never finishes a different book on re-merge", async () => {
+  const r = new FakeRemote();
+  put(r, "2026-10-12T08-00-00-a.json", cmd("start", { title: "A" }));
+  put(r, "2026-10-12T09-00-00-c.json", cmd("finish"));
+  const realRemove = r.remove.bind(r);
+  r.remove = async () => {
+    throw new Error("offline");
+  };
+  await syncLibrary(r, { books: [] });
+  r.remove = realRemove;
+  // Wade starts another book in the app before the next sync...
+  const lib = saved(r);
+  const withB = startBook(lib, "B");
+  await syncLibrary(r, withB);
+  const final = saved(r);
+  assert.equal(final.books.find((b) => b.title === "B")!.status, "listening");
+  assert.equal(final.books.filter((b) => b.title === "A").length, 1);
+});
+
+test("finish with no current book is a no-op; start with no title is ignored", async () => {
+  const r = new FakeRemote();
+  put(r, "2026-10-12T09-00-00-c.json", cmd("finish"));
+  put(r, "2026-10-12T09-01-00-d.json", cmd("start", { title: "  " }));
+  await syncLibrary(r, { books: [book("a", { status: "listening" })] });
+  assert.equal(saved(r).books[0].status, "listening");
+});
+
+test("plain text and {text} files are still notes", () => {
+  assert.equal(parseInboxItem("/inbox/x.txt", "hello", "2026-05-05T00:00:00Z")!.kind, "note");
+  assert.equal(parseInboxItem("/inbox/x.json", '{"text":"hi"}', "2026-05-05T00:00:00Z")!.kind, "note");
+  assert.equal(parseInboxItem("/inbox/x.json", '{"cmd":"finished"}', "2026-05-05T00:00:00Z")!.kind, "finish");
 });

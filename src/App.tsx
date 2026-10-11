@@ -1,40 +1,63 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { C, STEPS, display, body, mono, REVIEW_DUE_DAYS, PROMPTS } from "./constants";
-import { blankBook, daysSince, fmt, lastReviewDate, today } from "./lib/utils";
+import { C, body, display, mono } from "./constants";
+import { blankBook, today, uid } from "./lib/utils";
 import { loadLibrary, saveLibrary } from "./lib/storage";
-import { fmtStamp, isListening, newNote, readyDrafts, withBooks, withCurrent } from "./lib/library";
+import { finishBook, isListening, newNote, readyDrafts, startBook as startBookLib, withBooks, withCurrent } from "./lib/library";
 import { useSync } from "./lib/useSync";
 import { NoteSheet } from "./components/NoteSheet";
 import { DraftReview } from "./components/DraftReview";
 import { SettingsView } from "./components/SettingsView";
+import { TabBar } from "./components/TabBar";
+import type { Tab } from "./components/TabBar";
 import { exportCSV, exportJSON, exportMD, importJSON } from "./lib/exports";
 import { fetchSeedBooks } from "./lib/seed";
-import { Btn, Field, Input, Label, Stars, ThemePicker } from "./components/atoms";
-import { Spectrum, Ticks } from "./components/Spectrum";
-import { ReadingStats } from "./components/ReadingStats";
-import type { Book, LibraryData, ReflectionDepth } from "./types";
+import { NowView } from "./views/NowView";
+import { LibraryView } from "./views/LibraryView";
+import { BookDetail } from "./views/BookDetail";
+import { ReviewView } from "./views/ReviewView";
+import { QuickForm } from "./views/QuickForm";
+import { Wizard } from "./views/Wizard";
+import { wrap } from "./views/ui";
+import type { Book, LibraryData } from "./types";
 
-type View = "library" | "quick" | "wizard" | "review" | "settings" | "draft";
+type Overlay = "none" | "quick" | "wizard" | "settings" | "draft";
 type SaveState = "idle" | "saving" | "saved" | "error";
+interface Toast {
+  msg: string;
+  undo?: () => void;
+}
+interface Sheet {
+  /** Open the sheet for this book (default: the current one). */
+  bookId?: string;
+  /** Marking this book finished with no notes: ask for one line first. */
+  finishing?: string;
+}
+
+const SNOOZE_KEY = "ll-draft-snooze";
+const SNOOZE_DAYS = 3;
+const loadSnooze = (): Record<string, string> => {
+  try {
+    return JSON.parse(window.localStorage.getItem(SNOOZE_KEY) ?? "{}") as Record<string, string>;
+  } catch {
+    return {};
+  }
+};
 
 export default function App() {
   const [lib, setLib] = useState<LibraryData>(() => loadLibrary());
   const books = lib.books;
   const setBooks = useCallback((f: (prev: Book[]) => Book[]) => setLib((l) => withBooks(l, f(l.books))), []);
   const [saveState, setSaveState] = useState<SaveState>("idle");
-  const [view, setView] = useState<View>("library");
+  const [tab, setTab] = useState<Tab>("now");
+  const [overlay, setOverlay] = useState<Overlay>("none");
   const [draft, setDraft] = useState<Book | null>(null);
-  const [step, setStep] = useState(0);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [themeFilter, setThemeFilter] = useState<string | null>(null);
-  const [reviewBook, setReviewBook] = useState<Book | null>(null);
-  const [revealed, setRevealed] = useState(false);
-  const [reviewNote, setReviewNote] = useState("");
-  const [toast, setToast] = useState("");
-  const [noteOpen, setNoteOpen] = useState(false);
+  const [toast, setToast] = useState<Toast | null>(null);
+  const [sheet, setSheet] = useState<Sheet | null>(null);
   const [draftBookId, setDraftBookId] = useState<string | null>(null);
+  const [snoozed, setSnoozed] = useState<Record<string, string>>(loadSnooze);
   const firstRun = useRef(true);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   /* persist on change */
   useEffect(() => {
@@ -53,10 +76,12 @@ export default function App() {
     }
   }, [lib]);
 
-  const flash = useCallback((m: string) => {
-    setToast(m);
-    setTimeout(() => setToast(""), 2200);
+  const show = useCallback((t: Toast, ms: number) => {
+    clearTimeout(toastTimer.current);
+    setToast(t);
+    toastTimer.current = setTimeout(() => setToast(null), ms);
   }, []);
+  const flash = useCallback((m: string) => show({ msg: m }, 2400), [show]);
 
   const sync = useSync(lib, setLib, flash);
 
@@ -69,21 +94,26 @@ export default function App() {
       return copy;
     });
 
-  const remove = (id: string) => setBooks((prev) => prev.filter((b) => b.id !== id));
-
   const active = books.find((b) => b.id === activeId) ?? null;
   const listening = useMemo(() => books.filter(isListening), [books]);
   const finishedBooks = useMemo(() => books.filter((b) => !isListening(b)), [books]);
-  const drafted = readyDrafts(books, sync.drafts);
   const draftBook = books.find((b) => b.id === draftBookId) ?? null;
   const bookDraft = draftBook && sync.drafts ? sync.drafts.drafts[draftBook.id] : null;
+
+  const now = Date.now();
+  const drafted = readyDrafts(books, sync.drafts)
+    .filter((b) => !(snoozed[b.id] && new Date(snoozed[b.id]).getTime() > now))
+    .sort((a, b) => ((a.finishedAt ?? a.created) < (b.finishedAt ?? b.created) ? -1 : 1));
+  const waiting = finishedBooks.filter(
+    (b) => (b.notes?.length ?? 0) > 0 && !b.draftAccepted && !(sync.drafts?.drafts[b.id]) && !(b.depth === "full" && b.recall.trim()),
+  );
 
   /* ---------- capture while listening ---------- */
 
   const startBook = (title: string): string => {
-    const b = { ...blankBook(), title, depth: "quick" as const, status: "listening" as const, dateFinished: "" };
-    setLib((l) => withCurrent(withBooks(l, [...l.books, b]), b.id));
-    return b.id;
+    const id = uid();
+    setLib((l) => startBookLib(l, title, id));
+    return id;
   };
 
   const addNote = (bookId: string, text: string) => {
@@ -104,61 +134,40 @@ export default function App() {
     });
 
   const markFinished = (id: string) => {
-    setLib((l) => {
-      const next = withBooks(
-        l,
-        l.books.map((b) =>
-          b.id === id ? { ...b, status: "finished" as const, dateFinished: today(), finishedAt: new Date().toISOString() } : b,
-        ),
-      );
-      // Shortcut notes must not keep landing on a book that's done.
-      return next.currentBookId === id ? withCurrent(next, next.books.find((b) => b.status === "listening")?.id ?? null) : next;
-    });
-    flash("Finished. A draft reflection will be ready after the Saturday 02:30 run.");
+    setLib((l) => finishBook(l, id));
+    flash("Finished. The draft reflection arrives tomorrow morning.");
   };
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return finishedBooks
-      .filter((b) => !themeFilter || b.themes.includes(themeFilter))
-      .filter(
-        (b) =>
-          !q ||
-          [b.title, b.author, b.thesis, b.topApplication, b.themes.join(" "), b.keyIdeas, b.decision]
-            .join(" ")
-            .toLowerCase()
-            .includes(q),
-      )
-      .sort((a, b) => (a.dateFinished < b.dateFinished ? 1 : -1));
-  }, [finishedBooks, query, themeFilter]);
-
-  const dueCount = finishedBooks.filter((b) => {
-    const age = daysSince(lastReviewDate(b));
-    return age === null || age > REVIEW_DUE_DAYS;
-  }).length;
-
-  /* weighted pick: oldest-reviewed half, then random */
-  const startReview = () => {
-    if (!finishedBooks.length) return flash("Add a finished book first.");
-    const ranked = [...finishedBooks].sort((a, b) => {
-      const la = lastReviewDate(a) ?? "0000";
-      const lb = lastReviewDate(b) ?? "0000";
-      return la < lb ? -1 : 1;
-    });
-    const pool = ranked.slice(0, Math.max(1, Math.ceil(ranked.length / 2)));
-    setReviewBook(pool[Math.floor(Math.random() * pool.length)]);
-    setRevealed(false);
-    setReviewNote("");
-    setView("review");
+  /** Finished: with no notes there's nothing to draft from, so ask for one line first. */
+  const onFinish = (id: string) => {
+    const b = books.find((x) => x.id === id);
+    if (b && !(b.notes?.length)) setSheet({ finishing: id });
+    else markFinished(id);
   };
 
-  const logReview = (promptType: (typeof PROMPTS)[number]["type"]) => {
-    if (!reviewBook) return;
-    const b = books.find((x) => x.id === reviewBook.id);
+  const logReview = (bookId: string, type: "APPLY" | "SYNTHESIZE" | "UPDATE", note: string) => {
+    const b = books.find((x) => x.id === bookId);
     if (!b) return;
-    upsert({ ...b, reviews: [...b.reviews, { date: today(), type: promptType, note: reviewNote.trim() }] });
+    upsert({ ...b, reviews: [...b.reviews, { date: today(), type, note }] });
     flash("Review logged.");
-    setView("library");
+  };
+
+  const removeBook = (b: Book) => {
+    setBooks((prev) => prev.filter((x) => x.id !== b.id));
+    setActiveId(null);
+    show({ msg: "Removed.", undo: () => upsert(b) }, 6000);
+  };
+
+  const snooze = (id: string) => {
+    const next = { ...snoozed, [id]: new Date(Date.now() + SNOOZE_DAYS * 86400000).toISOString() };
+    setSnoozed(next);
+    try {
+      window.localStorage.setItem(SNOOZE_KEY, JSON.stringify(next));
+    } catch {
+      /* the banner just comes back next open */
+    }
+    setOverlay("none");
+    flash(`Okay, I'll ask again in ${SNOOZE_DAYS} days.`);
   };
 
   /* ---------- import/export ---------- */
@@ -169,10 +178,10 @@ export default function App() {
     importJSON(f)
       .then((imported) => {
         // Restore brings books back (and wins over older copies); it never deletes what's here.
-        const now = new Date().toISOString();
+        const stamp = new Date().toISOString();
         setBooks((prev) => {
           const byId = new Map(prev.map((b) => [b.id, b]));
-          for (const b of imported) byId.set(b.id, { ...b, updated: now });
+          for (const b of imported) byId.set(b.id, { ...b, updated: stamp });
           return [...byId.values()];
         });
         flash(`Restored ${imported.length} books.`);
@@ -194,78 +203,91 @@ export default function App() {
       .catch((err: Error) => flash(err.message));
   };
 
-  /* ---------- wizard ---------- */
+  /* ---------- add / edit forms ---------- */
 
   const set =
     <K extends keyof Book>(k: K) =>
     (v: Book[K]) =>
       setDraft((d) => (d ? { ...d, [k]: v } : d));
 
-  const openWizard = (bookOrNull: Book | null, depth: ReflectionDepth = "full") => {
-    setDraft(bookOrNull ? { ...bookOrNull } : { ...blankBook(), depth });
-    setStep(0);
-    setView(depth === "quick" ? "quick" : "wizard");
+  const toggleTheme = (t: string) => set("themes")(draft && draft.themes.includes(t) ? draft.themes.filter((x) => x !== t) : [...(draft?.themes ?? []), t]);
+
+  const openForm = (b: Book | null) => {
+    setDraft(b ? { ...b } : { ...blankBook(), depth: "quick" });
+    setOverlay("quick");
   };
 
-  const finishWizard = () => {
+  const saveDraft = (another: boolean) => {
     if (!draft) return;
     if (!draft.title.trim()) return flash("A title, at least.");
+    const editing = books.some((b) => b.id === draft.id);
     upsert(draft);
-    setView("library");
-    flash(draft.depth === "quick" ? "Added to the library." : "Reflection saved.");
+    if (another) {
+      setDraft({ ...blankBook(), depth: "quick" });
+      flash("Saved. Next one.");
+      return;
+    }
+    setOverlay("none");
+    if (editing) setActiveId(draft.id);
+    else setTab("library");
+    flash(editing ? "Saved." : "Added to the library.");
   };
 
-  const toggleTheme = (t: string) =>
-    set("themes")(draft && draft.themes.includes(t) ? draft.themes.filter((x) => x !== t) : [...(draft?.themes ?? []), t]);
+  const openNote = (bookId?: string) => {
+    if (bookId) setLib((l) => withCurrent(l, bookId));
+    setSheet({ bookId });
+  };
 
   /* ---------- chrome ---------- */
 
-  const shell: React.CSSProperties = {
-    minHeight: "100vh", background: C.bg, color: C.text, font: `400 16px/1.6 ${body}`,
-    padding: "0 0 calc(80px + env(safe-area-inset-bottom, 0px))",
+  const onTab = (t: Tab) => {
+    setTab(t);
+    setActiveId(null);
+    setOverlay("none");
   };
-  const wrap: React.CSSProperties = {
-    maxWidth: 780, margin: "0 auto",
-    padding: "0 max(20px, env(safe-area-inset-right, 0px)) 0 max(20px, env(safe-area-inset-left, 0px))",
-  };
-  const card: React.CSSProperties = { background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: 18 };
+  const inTabs = overlay === "none" && !active;
+  const syncLabel =
+    saveState === "error" ? "save failed"
+    : sync.state === "syncing" ? "syncing"
+    : sync.state === "error" ? "sync error"
+    : sync.state === "offline" ? "offline"
+    : sync.state === "off" ? "connect"
+    : saveState === "saving" ? "saving"
+    : "synced";
+  const syncColor = saveState === "error" || sync.state === "error" ? C.rose : sync.state === "offline" || sync.state === "off" ? C.amber : C.faint;
+  const sheetBook = sheet?.finishing ? books.find((b) => b.id === sheet.finishing) : undefined;
 
   return (
-    <div style={shell}>
+    <div
+      style={{
+        minHeight: "100vh", background: C.bg, color: C.text, font: `400 16px/1.6 ${body}`,
+        padding: "0 0 calc(96px + env(safe-area-inset-bottom, 0px))",
+      }}
+    >
       {/* header */}
       <div className="safe-top" style={{ borderBottom: `1px solid ${C.line}`, background: C.bg, position: "sticky", top: 0, zIndex: 10 }}>
         <div style={{ ...wrap, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px" }}>
-          <button
-            onClick={() => {
-              setView("library");
-              setActiveId(null);
-            }}
-            style={{ background: "none", border: "none", cursor: "pointer", padding: 0, textAlign: "left" }}
-          >
+          <button onClick={() => onTab("now")} style={{ background: "none", border: "none", cursor: "pointer", padding: 0, textAlign: "left" }}>
             <div style={{ font: `800 20px/1 ${display}`, color: C.text, letterSpacing: "-.02em" }}>Listening Log</div>
             <div style={{ font: `400 11px/1.4 ${mono}`, color: C.faint, letterSpacing: ".1em", marginTop: 3 }}>
-              {finishedBooks.length} BOOKS · {dueCount} DUE
+              {finishedBooks.length} BOOKS{listening.length ? ` · ${listening.length} LISTENING` : ""}
             </div>
           </button>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <button
-              onClick={() => setView("settings")}
-              title="Dropbox sync"
-              style={{
-                background: "none", border: "none", cursor: "pointer", padding: "4px 2px", font: `400 11px/1 ${mono}`,
-                color: saveState === "error" || sync.state === "error" ? C.rose : sync.state === "offline" ? C.amber : C.faint,
-              }}
+              onClick={() => setOverlay("settings")}
+              title="Dropbox sync and settings"
+              style={{ background: "none", border: "none", cursor: "pointer", padding: "8px 6px", font: `400 11px/1 ${mono}`, color: syncColor }}
             >
-              {saveState === "error" ? "save failed"
-                : sync.state === "syncing" ? "syncing"
-                : sync.state === "error" ? "sync error"
-                : sync.state === "offline" ? "offline"
-                : sync.state === "off" ? "sync off"
-                : saveState === "saving" ? "saving"
-                : "synced"}
+              {syncLabel}
             </button>
-            <Btn onClick={startReview}>Review</Btn>
-            <Btn kind="solid" onClick={() => openWizard(null, "full")}>+ Book</Btn>
+            <button
+              onClick={() => setOverlay("settings")}
+              aria-label="Settings"
+              style={{ background: "none", border: `1px solid ${C.line}`, borderRadius: 6, cursor: "pointer", padding: "7px 10px", color: C.muted, font: `400 16px/1 ${body}` }}
+            >
+              ⚙︎
+            </button>
           </div>
         </div>
       </div>
@@ -274,658 +296,131 @@ export default function App() {
         <div
           className="safe-bottom"
           style={{
-            position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 50,
-            background: C.surfaceHi, border: `1px solid ${C.accent}`, color: C.text,
-            padding: "10px 16px", borderRadius: 8, font: `500 14px/1 ${body}`,
+            position: "fixed", bottom: "calc(84px + env(safe-area-inset-bottom, 0px))", left: "50%", transform: "translateX(-50%)", zIndex: 70,
+            background: C.surfaceHi, border: `1px solid ${C.accent}`, color: C.text, padding: "10px 16px", borderRadius: 8,
+            font: `500 14px/1.3 ${body}`, display: "flex", gap: 14, alignItems: "center", maxWidth: "calc(100vw - 32px)",
           }}
         >
-          {toast}
+          <span>{toast.msg}</span>
+          {toast.undo && (
+            <button
+              onClick={() => {
+                toast.undo?.();
+                setToast(null);
+              }}
+              style={{ background: "none", border: "none", color: C.accent, font: `700 14px ${body}`, cursor: "pointer", padding: 0 }}
+            >
+              Undo
+            </button>
+          )}
         </div>
       )}
 
-      {/* ------------------------------ LIBRARY ------------------------------ */}
-      {view === "library" && !active && (
-        <div style={{ ...wrap, paddingTop: 26 }}>
-          {drafted.length > 0 && (
-            <div style={{ display: "grid", gap: 8, marginBottom: 18 }}>
-              {drafted.map((b) => (
-                <button
-                  key={b.id}
-                  onClick={() => {
-                    setDraftBookId(b.id);
-                    setView("draft");
-                  }}
-                  style={{ ...card, textAlign: "left", cursor: "pointer", width: "100%", borderColor: C.amber }}
-                >
-                  <span style={{ font: `600 11px/1 ${mono}`, color: C.amber, letterSpacing: ".1em" }}>DRAFT READY</span>
-                  <div style={{ font: `700 17px/1.3 ${display}`, marginTop: 6 }}>{b.title}</div>
-                  <div style={{ color: C.muted, font: `400 13px/1.4 ${body}` }}>Recall the core idea, then review the draft.</div>
-                </button>
-              ))}
-            </div>
+      {/* ------------------------------ TABS ------------------------------ */}
+      {inTabs && (
+        <div style={{ ...wrap, paddingTop: 22 }}>
+          {tab === "now" && (
+            <NowView
+              lib={lib}
+              listening={listening}
+              finished={finishedBooks}
+              drafted={drafted}
+              waiting={waiting}
+              sync={sync}
+              onOpenBook={setActiveId}
+              onNote={openNote}
+              onFinish={onFinish}
+              onOpenDraft={(id) => {
+                setDraftBookId(id);
+                setOverlay("draft");
+              }}
+              onSnooze={snooze}
+              onSetCurrent={(id) => setLib((l) => withCurrent(l, id))}
+              onAttachLoose={attachLoose}
+              onSettings={() => setOverlay("settings")}
+              onStarter={loadStarterLibrary}
+            />
           )}
-
-          {(lib.looseNotes?.length ?? 0) > 0 && (
-            <div style={{ ...card, marginBottom: 18, borderColor: C.amber }}>
-              <div style={{ font: `600 11px/1 ${mono}`, color: C.amber, letterSpacing: ".1em" }}>
-                {lib.looseNotes!.length} NOTE{lib.looseNotes!.length === 1 ? "" : "S"} WAITING FOR A BOOK
-              </div>
-              {lib.looseNotes!.map((n) => (
-                <div key={n.id} style={{ marginTop: 10 }}>
-                  <div style={{ font: `600 11px/1 ${mono}`, color: C.accent }}>{fmtStamp(n.ts)}</div>
-                  <div style={{ margin: "4px 0 6px", whiteSpace: "pre-wrap" }}>{n.text}</div>
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {(listening.length ? listening : finishedBooks.slice(-3)).map((b) => (
-                      <Btn key={b.id} onClick={() => attachLoose(n.id, b.id)}>Add to {b.title}</Btn>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div style={{ marginBottom: 22 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <div style={{ font: `600 11px/1 ${mono}`, color: C.accent, letterSpacing: ".1em" }}>LISTENING NOW</div>
-              <Btn kind="quiet" onClick={() => setNoteOpen(true)}>+ Start a book</Btn>
-            </div>
-            <div style={{ display: "grid", gap: 10 }}>
-              {listening.map((b) => {
-                const notes = b.notes ?? [];
-                const last = notes[notes.length - 1];
-                return (
-                  <div key={b.id} style={card}>
-                    <button
-                      onClick={() => setActiveId(b.id)}
-                      style={{ background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer", width: "100%" }}
-                    >
-                      <div style={{ font: `700 18px/1.25 ${display}`, color: C.text }}>{b.title}</div>
-                      <div style={{ font: `400 13px/1.4 ${body}`, color: C.muted, marginTop: 2 }}>
-                        {notes.length} note{notes.length === 1 ? "" : "s"}
-                        {last ? ` · last ${fmtStamp(last.ts)}` : ""}
-                      </div>
-                      {last && <div style={{ color: C.muted, font: `400 14px/1.5 ${body}`, marginTop: 8 }}>“{last.text.slice(0, 140)}”</div>}
-                    </button>
-                    <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                      <Btn kind="solid" onClick={() => { setLib((l) => withCurrent(l, b.id)); setNoteOpen(true); }}>+ Note</Btn>
-                      <Btn onClick={() => markFinished(b.id)}>Finished</Btn>
-                    </div>
-                  </div>
-                );
-              })}
-              {listening.length === 0 && (
-                <div style={{ ...card, color: C.muted }}>
-                  Nothing in progress. Tap <b>Note</b> (bottom right) to start a book and jot a thought as you listen.
-                </div>
-              )}
-            </div>
-          </div>
-
-          {finishedBooks.length === 0 && listening.length === 0 ? (
-            <div style={{ ...card, textAlign: "center", padding: "48px 24px" }}>
-              <div style={{ font: `700 26px/1.2 ${display}`, marginBottom: 10, letterSpacing: "-.02em" }}>
-                Nothing logged yet.
-              </div>
-              <p style={{ color: C.muted, maxWidth: 460, margin: "0 auto 22px" }}>
-                Start with the ten you've already finished. Quick add takes about two minutes each —
-                thesis, one action, done. Full reflections come later, for books you're still listening to.
-              </p>
-              <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-                <Btn kind="solid" onClick={() => openWizard(null, "quick")}>Quick add a finished book</Btn>
-                <Btn onClick={() => openWizard(null, "full")}>Full reflection</Btn>
-              </div>
-              <div style={{ marginTop: 14 }}>
-                <Btn kind="quiet" onClick={loadStarterLibrary}>Or load your starter library (16 books)</Btn>
-              </div>
-            </div>
-          ) : (
-            <>
-              <Spectrum books={finishedBooks} onPick={setActiveId} activeId={activeId} />
-              <div
-                style={{
-                  display: "flex", justifyContent: "space-between", font: `400 11px/1 ${mono}`,
-                  color: C.faint, letterSpacing: ".08em", marginBottom: 22,
-                }}
-              >
-                <span>OLDEST</span>
-                <span style={{ color: C.amber }}>▮ DUE FOR REVIEW</span>
-                <span>NEWEST</span>
-              </div>
-
-              <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-                <div style={{ flex: "1 1 220px" }}>
-                  <Input value={query} onChange={setQuery} placeholder="Search titles, ideas, actions…" />
-                </div>
-                <Btn kind="quiet" onClick={() => openWizard(null, "quick")}>Quick add</Btn>
-              </div>
-
-              {themeFilter && (
-                <div style={{ marginBottom: 14 }}>
-                  <Btn kind="quiet" onClick={() => setThemeFilter(null)}>✕ clear filter: {themeFilter}</Btn>
-                </div>
-              )}
-
-              <div style={{ display: "grid", gap: 10 }}>
-                {filtered.map((b) => {
-                  const age = daysSince(lastReviewDate(b));
-                  const cold = age === null || age > REVIEW_DUE_DAYS;
-                  return (
-                    <button
-                      key={b.id}
-                      onClick={() => setActiveId(b.id)}
-                      style={{ ...card, textAlign: "left", cursor: "pointer", width: "100%", display: "block" }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-                        <div style={{ font: `700 18px/1.25 ${display}`, color: C.text, letterSpacing: "-.01em" }}>
-                          {b.title}
-                        </div>
-                        <div style={{ font: `400 11px/1 ${mono}`, color: cold ? C.amber : C.faint, whiteSpace: "nowrap" }}>
-                          {cold ? "DUE" : `${age}d`}
-                        </div>
-                      </div>
-                      <div style={{ font: `400 13px/1.4 ${body}`, color: C.muted, marginTop: 2 }}>
-                        {b.author || "—"} · finished {fmt(b.dateFinished)}
-                      </div>
-                      {b.thesis && <div style={{ marginTop: 10, color: C.text, font: `400 15px/1.5 ${body}` }}>{b.thesis}</div>}
-                      {b.topApplication && (
-                        <div
-                          style={{
-                            marginTop: 8, paddingLeft: 10, borderLeft: `2px solid ${C.accent}`,
-                            color: C.muted, font: `400 14px/1.5 ${body}`,
-                          }}
-                        >
-                          {b.topApplication}
-                        </div>
-                      )}
-                      <div style={{ marginTop: 12 }}>
-                        <Ticks book={b} />
-                      </div>
-                      <div style={{ display: "flex", gap: 6, marginTop: 10, flexWrap: "wrap" }}>
-                        {b.themes.map((t) => (
-                          <span
-                            key={t}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setThemeFilter(t);
-                            }}
-                            style={{
-                              font: `500 11px/1 ${mono}`, color: C.muted, border: `1px solid ${C.line}`,
-                              padding: "5px 8px", borderRadius: 20,
-                            }}
-                          >
-                            {t}
-                          </span>
-                        ))}
-                      </div>
-                    </button>
-                  );
-                })}
-                {filtered.length === 0 && (
-                  <div style={{ ...card, color: C.muted, textAlign: "center" }}>No book matches that. Try a broader term.</div>
-                )}
-              </div>
-
-              <div style={{ marginTop: 34, paddingTop: 20, borderTop: `1px solid ${C.line}`, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <Btn onClick={() => exportCSV(finishedBooks)}>Export index (CSV)</Btn>
-                <Btn onClick={() => exportMD(books)}>Export notes (Markdown)</Btn>
-                <Btn kind="quiet" onClick={() => exportJSON(lib)}>Back up</Btn>
-                <Btn kind="quiet" onClick={() => setView("settings")}>Dropbox &amp; Shortcut</Btn>
-                <Btn kind="quiet" onClick={loadStarterLibrary}>Load starter library</Btn>
-                <label
-                  style={{
-                    font: `600 13px/1 ${body}`, color: C.muted, padding: "11px 16px",
-                    border: "1px solid transparent", cursor: "pointer",
-                  }}
-                >
-                  Restore
-                  <input type="file" accept="application/json" onChange={doImport} style={{ display: "none" }} />
-                </label>
-              </div>
-            </>
-          )}
+          {tab === "library" && <LibraryView books={finishedBooks} onOpen={setActiveId} onAdd={() => openForm(null)} />}
+          {tab === "review" && <ReviewView finished={finishedBooks} onLog={logReview} />}
         </div>
       )}
 
       {/* ------------------------------ DETAIL ------------------------------ */}
-      {active && view === "library" && (
-        <div style={{ ...wrap, paddingTop: 26 }}>
-          <Btn kind="quiet" onClick={() => setActiveId(null)}>← Library</Btn>
-          <div style={{ ...card, marginTop: 14 }}>
-            <div style={{ font: `800 28px/1.15 ${display}`, letterSpacing: "-.025em" }}>{active.title}</div>
-            <div style={{ color: C.muted, marginTop: 4 }}>
-              {active.author ? `${active.author} · ` : ""}
-              {isListening(active) ? "listening now" : `finished ${fmt(active.dateFinished)} · reviewed ${active.reviews.length}×`}
-            </div>
-            <div style={{ display: "flex", gap: 20, marginTop: 14, font: `400 12px/1 ${mono}`, color: C.faint }}>
-              <span>APPLICABILITY {active.applicability}/5</span>
-              <span>RATING {active.rating}/5</span>
-            </div>
-
-            {(
-              [
-                ["One-line thesis", active.thesis],
-                ["Top application", active.topApplication],
-                ["From memory", active.recall],
-                ["Key ideas", active.keyIdeas],
-                ["What surprised me", active.surprised],
-                ["Specifics", active.specifics],
-                ["Quotes", active.quotes],
-                ["Explained simply", active.feynman],
-                ["Confirms", active.confirms],
-                ["Contradicts", active.contradicts],
-                ["Links to", active.links],
-                ["Decision I'd make differently", active.decision],
-                ["Implementation intention", active.ifSituation ? `IF ${active.ifSituation}, THEN I will ${active.thenAction}` : ""],
-                ["Pre-mortem", active.preMortem],
-              ] as [string, string][]
-            )
-              .filter(([, v]) => v && String(v).trim())
-              .map(([k, v]) => (
-                <div key={k} style={{ marginTop: 18 }}>
-                  <Label>{k}</Label>
-                  <div style={{ whiteSpace: "pre-wrap", color: C.text }}>{v}</div>
-                </div>
-              ))}
-
-            {(active.notes?.length ?? 0) > 0 && (
-              <div style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${C.line}` }}>
-                <Label>Notes while listening</Label>
-                {active.notes!.map((n) => (
-                  <div key={n.id} style={{ marginTop: 10, font: `400 14px/1.5 ${body}` }}>
-                    <span style={{ font: `600 11px/1 ${mono}`, color: C.accent }}>
-                      {fmtStamp(n.ts)}{n.src === "shortcut" ? " · shortcut" : ""}
-                    </span>
-                    <div style={{ color: C.text, whiteSpace: "pre-wrap" }}>{n.text}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {active.reviews.length > 0 && (
-              <div style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${C.line}` }}>
-                <Label>Review log</Label>
-                {active.reviews.map((r, i) => (
-                  <div key={i} style={{ marginTop: 8, font: `400 14px/1.5 ${body}` }}>
-                    <span style={{ font: `600 11px/1 ${mono}`, color: C.accent }}>
-                      {r.date} · {r.type}
-                    </span>
-                    {r.note && <div style={{ color: C.muted, marginTop: 3 }}>{r.note}</div>}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div style={{ display: "flex", gap: 8, marginTop: 24, flexWrap: "wrap" }}>
-              {isListening(active) ? (
-                <>
-                  <Btn kind="solid" onClick={() => { setLib((l) => withCurrent(l, active.id)); setNoteOpen(true); }}>+ Note</Btn>
-                  <Btn onClick={() => { markFinished(active.id); setActiveId(null); }}>Finished</Btn>
-                </>
-              ) : (
-                <Btn kind="solid" onClick={() => openWizard(active, "full")}>Edit reflection</Btn>
-              )}
-              <Btn
-                kind="warn"
-                onClick={() => {
-                  remove(active.id);
-                  setActiveId(null);
-                  flash("Removed.");
-                }}
-              >
-                Delete
-              </Btn>
-            </div>
-          </div>
+      {overlay === "none" && active && (
+        <div style={wrap}>
+          <BookDetail
+            book={active}
+            onBack={() => setActiveId(null)}
+            onNote={() => openNote(active.id)}
+            onFinish={() => onFinish(active.id)}
+            onEdit={() => openForm(active)}
+            onDelete={() => removeBook(active)}
+          />
         </div>
       )}
 
-      {/* ------------------------------ QUICK ADD ------------------------------ */}
-      {view === "quick" && draft && (
-        <div style={{ ...wrap, paddingTop: 26 }}>
-          <Btn kind="quiet" onClick={() => setView("library")}>← Cancel</Btn>
-          <div style={{ ...card, marginTop: 14 }}>
-            <div style={{ font: `800 24px/1.2 ${display}`, letterSpacing: "-.02em" }}>Quick add</div>
-            <p style={{ color: C.muted, marginTop: 6, marginBottom: 22 }}>
-              For books you finished a while ago. Write from memory first — if you can't recall the thesis,
-              that's useful information. Two minutes, then move on.
-            </p>
-
-            <div style={{ display: "grid", gap: 16 }}>
-              <div>
-                <Label>Title</Label>
-                <Input value={draft.title} onChange={set("title")} placeholder="Thinking in Bets" />
-              </div>
-              <div>
-                <Label>Author</Label>
-                <Input value={draft.author} onChange={set("author")} placeholder="Annie Duke" />
-              </div>
-              <div>
-                <Label>Finished</Label>
-                <Input type="date" value={draft.dateFinished} onChange={set("dateFinished")} />
-              </div>
-              <div>
-                <Label hint="what's the core argument, in one sentence?">Thesis</Label>
-                <Field value={draft.thesis} onChange={set("thesis")} rows={2} placeholder="Good decisions and good outcomes are different things…" />
-              </div>
-              <div>
-                <Label hint="the one thing you'd actually do">Top application</Label>
-                <Field value={draft.topApplication} onChange={set("topApplication")} rows={2} placeholder="Separate decision quality from outcome when reviewing trades." />
-              </div>
-              <div>
-                <Label hint="if / then">Implementation intention</Label>
-                <div style={{ display: "grid", gap: 8 }}>
-                  <Input value={draft.ifSituation} onChange={set("ifSituation")} placeholder="IF a position loses money…" />
-                  <Input value={draft.thenAction} onChange={set("thenAction")} placeholder="THEN I will ask whether the process was wrong or just the result." />
-                </div>
-              </div>
-              <div>
-                <Label>Themes</Label>
-                <ThemePicker selected={draft.themes} onToggle={toggleTheme} />
-              </div>
-              <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
-                <div>
-                  <Label>Applicability</Label>
-                  <Stars value={draft.applicability} onChange={set("applicability")} />
-                </div>
-                <div>
-                  <Label>Rating</Label>
-                  <Stars value={draft.rating} onChange={set("rating")} glyph="★" />
-                </div>
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: 8, marginTop: 26 }}>
-              <Btn kind="solid" onClick={finishWizard}>Add to library</Btn>
-              <Btn
-                onClick={() => {
-                  if (draft) upsert(draft);
-                  setDraft({ ...blankBook(), depth: "quick" });
-                  flash("Saved. Next one.");
-                }}
-              >
-                Save &amp; add another
-              </Btn>
-            </div>
-          </div>
+      {/* ------------------------------ FORMS ------------------------------ */}
+      {overlay === "quick" && draft && (
+        <div style={wrap}>
+          <QuickForm
+            draft={draft}
+            editing={books.some((b) => b.id === draft.id)}
+            set={set}
+            toggleTheme={toggleTheme}
+            onSave={() => saveDraft(false)}
+            onAnother={() => saveDraft(true)}
+            onCancel={() => setOverlay("none")}
+            onFull={() => setOverlay("wizard")}
+          />
         </div>
       )}
-
-      {/* ------------------------------ FULL WIZARD ------------------------------ */}
-      {view === "wizard" && draft && (
-        <div style={{ ...wrap, paddingTop: 26 }}>
-          <Btn kind="quiet" onClick={() => setView("library")}>← Cancel</Btn>
-
-          <div style={{ display: "flex", gap: 4, margin: "16px 0 20px" }}>
-            {STEPS.map((s, i) => (
-              <button
-                key={s.n}
-                onClick={() => setStep(i)}
-                style={{
-                  flex: 1, height: 3, border: "none", padding: 0, cursor: "pointer",
-                  background: i <= step ? C.accent : C.line,
-                }}
-                aria-label={s.n}
-              />
-            ))}
-          </div>
-
-          <div style={card}>
-            <div style={{ font: `400 11px/1 ${mono}`, color: C.faint, letterSpacing: ".1em" }}>
-              STEP {step + 1} OF 6 · {STEPS[step].hint.toUpperCase()}
-            </div>
-            <div style={{ font: `800 26px/1.2 ${display}`, letterSpacing: "-.02em", margin: "8px 0 20px" }}>{STEPS[step].n}</div>
-
-            {step === 0 && (
-              <div style={{ display: "grid", gap: 16 }}>
-                <div>
-                  <Label>Title</Label>
-                  <Input value={draft.title} onChange={set("title")} />
-                </div>
-                <div>
-                  <Label>Author</Label>
-                  <Input value={draft.author} onChange={set("author")} />
-                </div>
-                <div>
-                  <Label>Finished</Label>
-                  <Input type="date" value={draft.dateFinished} onChange={set("dateFinished")} />
-                </div>
-                <div style={{ padding: 12, background: C.bg, borderRadius: 6, color: C.muted, font: `400 14px/1.5 ${body}` }}>
-                  Close Audible. Everything below comes from memory only — that act of retrieval is what
-                  makes it stick.
-                </div>
-                <div>
-                  <Label>Core argument, one sentence</Label>
-                  <Field value={draft.recall} onChange={set("recall")} rows={2} />
-                </div>
-                <div>
-                  <Label>Three to five ideas you remember</Label>
-                  <Field value={draft.keyIdeas} onChange={set("keyIdeas")} rows={5} />
-                </div>
-                <div>
-                  <Label>What surprised you or changed your mind</Label>
-                  <Field value={draft.surprised} onChange={set("surprised")} rows={2} />
-                </div>
-              </div>
-            )}
-
-            {step === 1 && (
-              <div style={{ display: "grid", gap: 16 }}>
-                <div style={{ padding: 12, background: C.bg, borderRadius: 6, color: C.muted, font: `400 14px/1.5 ${body}` }}>
-                  Now open your Audible clips and bookmarks. Fill in the specifics your memory dropped —
-                  numbers, frameworks, caveats. Your words, not the author's.
-                </div>
-                <div>
-                  <Label>Specifics</Label>
-                  <Field value={draft.specifics} onChange={set("specifics")} rows={6} />
-                </div>
-                <div>
-                  <Label hint="one to three, with rough chapter">Quotes worth keeping</Label>
-                  <Field value={draft.quotes} onChange={set("quotes")} rows={4} />
-                </div>
-              </div>
-            )}
-
-            {step === 2 && (
-              <div style={{ display: "grid", gap: 16 }}>
-                <div style={{ padding: 12, background: C.bg, borderRadius: 6, color: C.muted, font: `400 14px/1.5 ${body}` }}>
-                  Explain the most important idea to a smart colleague who hasn't read it. Where you get
-                  stuck is where you don't actually understand it yet.
-                </div>
-                <div>
-                  <Label>In plain language</Label>
-                  <Field value={draft.feynman} onChange={set("feynman")} rows={7} />
-                </div>
-              </div>
-            )}
-
-            {step === 3 && (
-              <div style={{ display: "grid", gap: 16 }}>
-                <div>
-                  <Label>This confirms what I already believed about…</Label>
-                  <Field value={draft.confirms} onChange={set("confirms")} rows={2} />
-                </div>
-                <div>
-                  <Label>This contradicts or complicates…</Label>
-                  <Field value={draft.contradicts} onChange={set("contradicts")} rows={2} />
-                </div>
-                <div>
-                  <Label hint="name them">Other books or ideas this links to</Label>
-                  <Field value={draft.links} onChange={set("links")} rows={2} />
-                </div>
-              </div>
-            )}
-
-            {step === 4 && (
-              <div style={{ display: "grid", gap: 16 }}>
-                <div>
-                  <Label>One decision — work or life — you'd make differently</Label>
-                  <Field value={draft.decision} onChange={set("decision")} rows={3} />
-                </div>
-                <div>
-                  <Label hint="the highest-leverage thing on this page">Implementation intention</Label>
-                  <div style={{ display: "grid", gap: 8 }}>
-                    <Input value={draft.ifSituation} onChange={set("ifSituation")} placeholder="IF this specific situation happens…" />
-                    <Input value={draft.thenAction} onChange={set("thenAction")} placeholder="THEN I will take this specific action." />
-                  </div>
-                </div>
-                <div>
-                  <Label hint="only if this prompts a real decision">Pre-mortem</Label>
-                  <Field
-                    value={draft.preMortem}
-                    onChange={set("preMortem")}
-                    rows={3}
-                    placeholder="It's a year from now and acting on this backfired. Why?"
-                  />
-                </div>
-              </div>
-            )}
-
-            {step === 5 && (
-              <div style={{ display: "grid", gap: 16 }}>
-                <div>
-                  <Label hint="goes on the index">One-line thesis</Label>
-                  <Field value={draft.thesis} onChange={set("thesis")} rows={2} />
-                </div>
-                <div>
-                  <Label>Top application</Label>
-                  <Field value={draft.topApplication} onChange={set("topApplication")} rows={2} />
-                </div>
-                <div>
-                  <Label>Themes</Label>
-                  <ThemePicker selected={draft.themes} onToggle={toggleTheme} />
-                </div>
-                <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
-                  <div>
-                    <Label>Applicability</Label>
-                    <Stars value={draft.applicability} onChange={set("applicability")} />
-                  </div>
-                  <div>
-                    <Label>Rating</Label>
-                    <Stars value={draft.rating} onChange={set("rating")} glyph="★" />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div style={{ display: "flex", gap: 8, marginTop: 26, justifyContent: "space-between" }}>
-              <Btn onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0}>Back</Btn>
-              {step < 5 ? (
-                <Btn kind="solid" onClick={() => setStep((s) => s + 1)}>Next</Btn>
-              ) : (
-                <Btn kind="solid" onClick={finishWizard}>Save reflection</Btn>
-              )}
-            </div>
-          </div>
+      {overlay === "wizard" && draft && (
+        <div style={wrap}>
+          <Wizard draft={draft} set={set} toggleTheme={toggleTheme} onSave={() => saveDraft(false)} onCancel={() => setOverlay("quick")} />
         </div>
       )}
-
-      {/* ------------------------------ REVIEW ------------------------------ */}
-      {view === "review" &&
-        reviewBook &&
-        (() => {
-          const promptIdx = reviewBook.reviews.length % 3;
-          const p = PROMPTS[promptIdx];
-          const b = books.find((x) => x.id === reviewBook.id) || reviewBook;
-          return (
-            <div style={{ ...wrap, paddingTop: 26 }}>
-              <Btn kind="quiet" onClick={() => setView("library")}>← Library</Btn>
-
-              <div style={{ ...card, marginTop: 14, marginBottom: 14 }}>
-                <ReadingStats books={books} />
-              </div>
-
-              <div style={{ ...card }}>
-                <div style={{ font: `400 11px/1 ${mono}`, color: C.amber, letterSpacing: ".1em" }}>THIS WEEK'S BOOK</div>
-                <div style={{ font: `800 30px/1.15 ${display}`, letterSpacing: "-.025em", margin: "8px 0 2px" }}>{b.title}</div>
-                <div style={{ color: C.muted }}>
-                  {b.author} · finished {fmt(b.dateFinished)}
-                  {b.reviews.length ? ` · last reviewed ${fmt(b.reviews[b.reviews.length - 1].date)}` : " · never reviewed"}
-                </div>
-
-                {!revealed ? (
-                  <div style={{ marginTop: 26 }}>
-                    <div style={{ padding: 16, background: C.bg, borderRadius: 8, border: `1px solid ${C.line}` }}>
-                      <div style={{ font: `700 18px/1.4 ${display}`, marginBottom: 6 }}>First, from memory: what was the core idea?</div>
-                      <p style={{ color: C.muted, margin: 0, font: `400 15px/1.55 ${body}` }}>
-                        Say it out loud or think it through before you open the notes. The effort of
-                        retrieval is the part that works — reading the notes first skips it.
-                      </p>
-                    </div>
-                    <div style={{ marginTop: 16 }}>
-                      <Btn kind="solid" onClick={() => setRevealed(true)}>I've recalled it — show my notes</Btn>
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ marginTop: 24 }}>
-                    {b.thesis && (
-                      <>
-                        <Label>Thesis</Label>
-                        <div style={{ marginBottom: 16 }}>{b.thesis}</div>
-                      </>
-                    )}
-                    {b.keyIdeas && (
-                      <>
-                        <Label>Key ideas</Label>
-                        <div style={{ whiteSpace: "pre-wrap", marginBottom: 16 }}>{b.keyIdeas}</div>
-                      </>
-                    )}
-                    {b.ifSituation && (
-                      <div style={{ padding: 12, borderLeft: `2px solid ${C.accent}`, marginBottom: 20, color: C.muted }}>
-                        IF {b.ifSituation}, THEN I will {b.thenAction}
-                      </div>
-                    )}
-
-                    <div style={{ padding: 16, background: C.bg, borderRadius: 8, border: `1px solid ${C.accent}` }}>
-                      <div style={{ font: `600 11px/1 ${mono}`, color: C.accent, letterSpacing: ".1em" }}>{p.type}</div>
-                      <div style={{ font: `700 18px/1.4 ${display}`, marginTop: 8 }}>{p.q}</div>
-                    </div>
-
-                    <div style={{ marginTop: 16 }}>
-                      <Label hint="optional — one line is plenty">Add to the notes</Label>
-                      <Field value={reviewNote} onChange={setReviewNote} rows={3} />
-                    </div>
-
-                    <div style={{ display: "flex", gap: 8, marginTop: 18, flexWrap: "wrap" }}>
-                      <Btn kind="solid" onClick={() => logReview(p.type)}>Log review</Btn>
-                      <Btn onClick={startReview}>Different book</Btn>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })()}
 
       {/* ------------------------------ SETTINGS / DRAFT ------------------------------ */}
-      {view === "settings" && (
+      {overlay === "settings" && (
         <div style={wrap}>
-          <SettingsView sync={sync} onBack={() => setView("library")} flash={flash} />
+          <SettingsView
+            sync={sync}
+            onBack={() => setOverlay("none")}
+            flash={flash}
+            data={{
+              onCSV: () => exportCSV(finishedBooks),
+              onMarkdown: () => exportMD(books),
+              onBackup: () => exportJSON(lib),
+              onRestore: doImport,
+              onStarter: loadStarterLibrary,
+            }}
+          />
         </div>
       )}
-
-      {view === "draft" && draftBook && bookDraft && (
+      {overlay === "draft" && draftBook && bookDraft && (
         <div style={wrap}>
           <DraftReview
             key={bookDraft.id}
             book={draftBook}
             draft={bookDraft}
-            onCancel={() => setView("library")}
+            onCancel={() => setOverlay("none")}
+            onSnooze={() => snooze(draftBook.id)}
             onAccept={(b) => {
               upsert(b);
-              setView("library");
+              setOverlay("none");
               flash("Reflection saved.");
             }}
           />
         </div>
       )}
 
-      {/* ------------------------------ ONE-TAP NOTE ------------------------------ */}
-      {view === "library" && !noteOpen && (
+      {/* ------------------------------ ONE-TAP NOTE + TABS ------------------------------ */}
+      {!sheet && overlay !== "draft" && overlay !== "settings" && overlay !== "quick" && overlay !== "wizard" && (
         <button
-          onClick={() => setNoteOpen(true)}
-          className="safe-bottom"
+          onClick={() => openNote()}
           style={{
-            position: "fixed", right: 20, bottom: "calc(24px + env(safe-area-inset-bottom, 0px))", zIndex: 40,
+            position: "fixed", right: 20, bottom: "calc(76px + env(safe-area-inset-bottom, 0px))", zIndex: 40,
             background: C.accent, color: "#0C1116", border: "none", borderRadius: 28, padding: "16px 22px",
             font: `700 15px/1 ${body}`, cursor: "pointer", boxShadow: "0 4px 16px rgba(0,0,0,.4)",
           }}
@@ -933,13 +428,24 @@ export default function App() {
           ✎ Note
         </button>
       )}
-      {noteOpen && (
+      {overlay === "none" && !active && <TabBar tab={tab} onTab={onTab} />}
+
+      {sheet && (
         <NoteSheet
+          key={sheet.finishing ?? sheet.bookId ?? "any"}
           listening={listening}
-          currentId={lib.currentBookId ?? null}
-          onSave={addNote}
+          currentId={sheet.bookId ?? lib.currentBookId ?? null}
+          finishing={sheetBook}
+          onSave={(id, text) => {
+            addNote(id, text);
+            if (sheet.finishing) markFinished(sheet.finishing);
+          }}
           onStartBook={startBook}
-          onClose={() => setNoteOpen(false)}
+          onSkip={() => {
+            if (sheet.finishing) markFinished(sheet.finishing);
+            setSheet(null);
+          }}
+          onClose={() => setSheet(null)}
         />
       )}
     </div>

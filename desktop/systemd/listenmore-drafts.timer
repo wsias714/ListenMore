@@ -1,8 +1,8 @@
 [Unit]
-Description=ListenMore weekly drafts, Saturday 02:30
+Description=ListenMore daily check, 02:30 (drafts only when a book was finished)
 
 [Timer]
-OnCalendar=Sat *-*-* 02:30:00
+OnCalendar=*-*-* 02:30:00
 Persistent=true
 
 [Install]

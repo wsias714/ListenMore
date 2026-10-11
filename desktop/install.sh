@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install (or refresh) the ListenMore nightly timer as a systemd *user* unit.
+# Install (or refresh) the ListenMore daily timer as a systemd *user* unit.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 dest="$HOME/.config/systemd/user"

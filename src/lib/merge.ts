@@ -60,6 +60,7 @@ export function mergeLibraries(local: LibraryData, remote: LibraryData): Library
   }
 
   const loose = unionNotes(local.looseNotes, remote.looseNotes);
+  const applied = [...new Set([...(remote.inboxApplied ?? []), ...(local.inboxApplied ?? [])])].slice(-300);
   const books = [...byId.values()];
   // The later explicit choice of "current book" wins (null means "none", on purpose).
   const useLocal = (local.currentAt ?? "") >= (remote.currentAt ?? "");
@@ -72,6 +73,7 @@ export function mergeLibraries(local: LibraryData, remote: LibraryData): Library
     currentBookId: current && byId.has(current) ? current : null,
     ...(currentAt ? { currentAt } : {}),
     ...(loose.length ? { looseNotes: loose } : {}),
+    ...(applied.length ? { inboxApplied: applied } : {}),
   };
 }
 
@@ -101,6 +103,7 @@ function canonical(l: LibraryData) {
     currentBookId: l.currentBookId ?? null,
     currentAt: l.currentAt ?? "",
     looseNotes: l.looseNotes ?? [],
+    inboxApplied: [...(l.inboxApplied ?? [])].sort(),
   };
 }
 

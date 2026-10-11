@@ -1,5 +1,5 @@
-import type { Book, DraftsFile, LibraryData, Note } from "../types";
-import { uid } from "./utils";
+import type { Book, DraftsFile, LibraryData, Note } from "../types.ts";
+import { blankBook, uid } from "./utils.ts";
 
 /** Apply a books update, stamping `updated` on whatever changed and tombstoning deletes. */
 export function withBooks(lib: LibraryData, next: Book[]): LibraryData {
@@ -27,6 +27,24 @@ export const withCurrent = (lib: LibraryData, id: string | null): LibraryData =>
   currentBookId: id,
   currentAt: new Date().toISOString(),
 });
+
+/** Start a book you're listening to and make it the capture target. */
+export function startBook(lib: LibraryData, title: string, id: string = uid(), created: string = new Date().toISOString()): LibraryData {
+  const b: Book = { ...blankBook(), id, title, depth: "quick", status: "listening", dateFinished: "", created };
+  return withCurrent(withBooks(lib, [...lib.books, b]), id);
+}
+
+/** Mark a book finished; if it was the capture target, hand the target to another listening book (or none). */
+export function finishBook(lib: LibraryData, id: string, when: Date = new Date()): LibraryData {
+  if (!lib.books.some((b) => b.id === id)) return lib;
+  const next = withBooks(
+    lib,
+    lib.books.map((b) =>
+      b.id === id ? { ...b, status: "finished" as const, dateFinished: when.toISOString().slice(0, 10), finishedAt: when.toISOString() } : b,
+    ),
+  );
+  return next.currentBookId === id ? withCurrent(next, next.books.find((b) => b.status === "listening")?.id ?? null) : next;
+}
 
 export const isListening = (b: Book) => b.status === "listening";
 

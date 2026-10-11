@@ -1,8 +1,8 @@
-# Capture while listening, Dropbox sync, nightly drafts
+# Capture while listening, Dropbox sync, daily drafts
 
 Why: filling in a reflection after finishing a book wasn't happening. So the app now
 captures notes *while* listening (one tap, typed or dictated), stores everything in
-Dropbox, and a nightly job on Wade's desktop drafts the reflection from the notes. Wade
+Dropbox, and a daily check on Wade's desktop drafts the reflection from the notes. Wade
 still does the retrieval step (recall first), then edits and accepts.
 
 ## Who writes what (nobody writes the same file)
@@ -12,7 +12,7 @@ Dropbox folder `Apps/ListenMore/` (the app's "App folder"; the app can reach not
 | Path | Written by | Contents |
 |---|---|---|
 | `library.json` | the app (phone) | books, notes, reviews, tombstones |
-| `inbox/<stamp>.txt` | the iPhone Shortcut | one dictated note per file |
+| `inbox/<stamp>-*.txt/.json` | the iPhone Shortcut | one file per action: a dictated note, or a `{"cmd":"start","title":…}` / `{"cmd":"finish"}` command |
 | `drafts.json` | the desktop job | one draft per finished book with notes |
 | `backups/premigration-*.json` | the app, once | safety copy of the phone's data before first sync |
 
@@ -21,8 +21,11 @@ Dropbox folder `Apps/ListenMore/` (the app's "App folder"; the app can reach not
   Merge never drops data: notes/reviews are unions; later edit wins fields; "finished" is
   sticky; deletes are tombstoned.
 - **Shortcut notes are separate files** (not appended to a shared file) so the Shortcut and
-  the app can never overwrite each other. The app folds them into the current book's notes
-  on its next sync, then deletes the inbox files.
+  the app can never overwrite each other. The app applies them in timestamp order on its next
+  sync (note -> current book, `start` -> new listening book that becomes current, `finish` ->
+  finishes the current book), then deletes the inbox files. Applied command ids are kept in
+  `library.json` (`inboxApplied`) so a leftover file from a failed delete can never finish a
+  different book later. Notes are idempotent by filename id.
 - localStorage stays as the offline cache. JSON Back up / Restore still work (Restore merges
   back, it never deletes).
 
@@ -54,17 +57,23 @@ Open the home-screen app → tap the sync label at top right ("sync off") → pa
 
 ## Capturing
 
-- **Note** button (bottom right of the library): opens a sheet with the keyboard already up.
+- App layout: bottom tabs **Now / Library / Review**; Settings (gear) holds Dropbox, the
+  Shortcut recipe and Data (export, backup, restore).
+- **Note** button (bottom right, on every screen): opens a sheet with the keyboard already up.
   Tap the keyboard's mic to dictate (iOS dictation; the Web Speech API is not used: it is
-  unreliable in home-screen web apps). Pick the book or start a new one inline.
-- **Listening now** cards: `+ Note` and `Finished`. Finishing sets the date and queues the
-  book for the next weekly run.
-- **Shortcut:** see Settings → Dropbox sync → "iPhone Shortcut". Notes land on the book you
-  last captured to (the "current" book); if none is current they wait as loose notes.
+  unreliable in home-screen web apps). Pick the book or start a new one inline. Unsent text is
+  kept if the sheet is closed; *Save & another* keeps it open.
+- **Listening now** cards (on Now): `+ Note` and `Finished`. Finished on a book with no notes asks
+  for one line first (nothing to draft from otherwise). Finishing queues the book for the next
+  daily run, so the draft is there the next morning.
+- **Shortcut:** one Action-button shortcut with a menu: *Note* (dictate), *Start a book*
+  (dictate the title), *Finished*. See Settings → "iPhone Shortcut". It needs no app open.
+  Notes land on the book you last captured to (the "current" book); if none is current they
+  wait on Now as loose notes, filed with one tap.
 
-## Weekly job (desktop)
+## Daily check (desktop)
 
-`desktop/` — systemd user timer `listenmore-drafts.timer`, Saturday 02:30 (`Persistent=true`, catches up if the machine was off).
+`desktop/` — systemd user timer `listenmore-drafts.timer`, every day 02:30 (`Persistent=true`, catches up if the machine was off). Most nights nothing is newly finished and Haiku is not called; insights stay weekly (Fri/Sat gate in `insights.py`).
 Install/refresh: `desktop/install.sh`. Logs: `~/.local/state/listenmore/jobs.log`.
 
 - `draft_job.py`: for books that are finished, have notes, and no accepted/self-written
@@ -83,10 +92,12 @@ Install/refresh: `desktop/install.sh`. Logs: `~/.local/state/listenmore/jobs.log
 
 ## Draft ready, in the app
 
-A "DRAFT READY" card appears on the library. Tapping it asks for the core idea *from memory*
-first (stored as the book's "from memory" answer); only then is the draft revealed, in
-editable fields with the model's open questions and your original notes alongside. Accept
-saves it as a full reflection and clears the badge.
+A "DRAFT READY" card appears on Now (oldest first; *Not now* snoozes it 3 days on that phone).
+It asks for the core idea *from memory* first, in one auto-focused box (dictation works),
+stored as the book's "from memory" answer. *Can't recall, show me* skips the typing and
+records the miss. The draft then shows thesis, top application and IF/THEN, plus the model's
+open questions; the rest (key ideas, specifics, decision, themes, ratings) is under *More*.
+Accept saves it as a full reflection and clears the card.
 
 ## Saturday insights (Bench)
 

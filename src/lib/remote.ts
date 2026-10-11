@@ -1,4 +1,5 @@
 import type { LibraryData, Note } from "../types";
+import { finishBook, startBook } from "./library.ts";
 import { mergeLibraries, routeNotes, sameLibrary } from "./merge.ts";
 
 /* Sync engine, written against a tiny `Remote` interface so it can be tested
@@ -36,6 +37,7 @@ export interface SyncResult {
   lib: LibraryData;
   pushed: boolean;
   inboxMerged: number;
+  inboxCommands: number;
 }
 
 const MAX_ATTEMPTS = 5;
@@ -46,43 +48,91 @@ function parseLibrary(text: string): LibraryData {
   return p;
 }
 
-/** One inbox file -> a Note. Id comes from the filename so re-reading is idempotent. */
-export function parseInboxFile(path: string, text: string, modified: string): Note | null {
+/** What a Shortcut can drop in /inbox: a thought, or a "start a book" / "finished" command. */
+export type InboxItem =
+  | { kind: "note"; note: Note }
+  | { kind: "start"; id: string; ts: string; title: string }
+  | { kind: "finish"; id: string; ts: string };
+
+/** One inbox file -> an item. Ids come from the filename so re-reading is idempotent. */
+export function parseInboxItem(path: string, text: string, modified: string): InboxItem | null {
   const name = path.split("/").pop() ?? path;
-  const id = "inbox-" + name.replace(/\.[^.]+$/, "");
+  const stem = name.replace(/\.[^.]+$/, "");
+  const id = "inbox-" + stem;
   let body = text.trim();
   let ts = "";
+  let cmd = "";
+  let title = "";
   if (body.startsWith("{")) {
     try {
-      const j = JSON.parse(body) as { text?: unknown; ts?: unknown };
+      const j = JSON.parse(body) as { text?: unknown; ts?: unknown; cmd?: unknown; title?: unknown };
       if (typeof j.text === "string") body = j.text.trim();
       if (typeof j.ts === "string") ts = j.ts;
+      if (typeof j.cmd === "string") cmd = j.cmd.trim().toLowerCase();
+      if (typeof j.title === "string") title = j.title.trim();
     } catch {
       /* not JSON after all; treat as plain text */
     }
   }
-  if (!body) return null;
   if (!ts) {
     // Shortcut names files like 2026-10-11T14-03-22....txt
     const m = name.match(/^(\d{4}-\d{2}-\d{2})[T_ ](\d{2})[-:.](\d{2})(?:[-:.](\d{2}))?/);
     if (m) ts = `${m[1]}T${m[2]}:${m[3]}:${m[4] ?? "00"}`;
   }
   const d = new Date(ts || modified);
-  return { id, ts: isNaN(d.getTime()) ? modified : d.toISOString(), text: body, src: "shortcut" };
+  const when = isNaN(d.getTime()) ? modified : d.toISOString();
+  if (cmd === "start") return title ? { kind: "start", id, ts: when, title } : null;
+  if (cmd === "finish" || cmd === "finished") return { kind: "finish", id, ts: when };
+  if (!body) return null;
+  return { kind: "note", note: { id, ts: when, text: body, src: "shortcut" } };
 }
 
-async function readInbox(remote: Remote): Promise<{ notes: Note[]; files: string[] }> {
+/** Back-compat helper: the Note in an inbox file, or null if it's a command or empty. */
+export function parseInboxFile(path: string, text: string, modified: string): Note | null {
+  const item = parseInboxItem(path, text, modified);
+  return item?.kind === "note" ? item.note : null;
+}
+
+/** Fold inbox items into the library in the order they were made, so "start", a note, then "finish" behave. */
+export function applyInbox(lib: LibraryData, items: InboxItem[]): { lib: LibraryData; notes: number; commands: number } {
+  const ordered = [...items].sort((a, b) => {
+    const ta = a.kind === "note" ? a.note.ts : a.ts;
+    const tb = b.kind === "note" ? b.note.ts : b.ts;
+    return ta < tb ? -1 : ta > tb ? 1 : 0;
+  });
+  let cur = lib;
+  let notes = 0;
+  let commands = 0;
+  for (const it of ordered) {
+    if (it.kind === "note") {
+      cur = routeNotes(cur, [it.note]);
+      notes++;
+      continue;
+    }
+    if ((cur.inboxApplied ?? []).includes(it.id)) continue; // a leftover file from a failed delete
+    if (it.kind === "start") {
+      if (!cur.books.some((b) => b.id === it.id)) cur = startBook(cur, it.title, it.id, it.ts);
+    } else if (cur.currentBookId) {
+      cur = finishBook(cur, cur.currentBookId, new Date(it.ts));
+    }
+    cur = { ...cur, inboxApplied: [...(cur.inboxApplied ?? []), it.id].slice(-300) };
+    commands++;
+  }
+  return { lib: cur, notes, commands };
+}
+
+async function readInbox(remote: Remote): Promise<{ items: InboxItem[]; files: string[] }> {
   const entries = await remote.list(INBOX_DIR);
-  const notes: Note[] = [];
+  const items: InboxItem[] = [];
   const files: string[] = [];
   for (const e of entries) {
     const f = await remote.read(e.path);
     if (!f) continue;
-    const n = parseInboxFile(e.path, f.text, e.modified);
+    const it = parseInboxItem(e.path, f.text, e.modified);
     files.push(e.path); // unparseable/empty files are cleared too, they're noise
-    if (n) notes.push(n);
+    if (it) items.push(it);
   }
-  return { notes, files };
+  return { items, files };
 }
 
 /**
@@ -113,10 +163,11 @@ export async function syncLibrary(
     }
 
     const inbox = await readInbox(remote);
-    const merged = routeNotes(mergeLibraries(working, remoteLib), inbox.notes);
+    const applied = applyInbox(mergeLibraries(working, remoteLib), inbox.items);
+    const merged = applied.lib;
 
     if (r && !inbox.files.length && sameLibrary(merged, remoteLib)) {
-      return { lib: merged, pushed: false, inboxMerged: 0 };
+      return { lib: merged, pushed: false, inboxMerged: 0, inboxCommands: 0 };
     }
     try {
       await remote.write(LIB_PATH, JSON.stringify(merged), r?.rev ?? null);
@@ -135,7 +186,7 @@ export async function syncLibrary(
         /* ids are filename-derived, so a leftover file re-merges harmlessly */
       }
     }
-    return { lib: merged, pushed: true, inboxMerged: inbox.notes.length };
+    return { lib: merged, pushed: true, inboxMerged: applied.notes, inboxCommands: applied.commands };
   }
   throw new Error("Dropbox kept changing underneath the sync; try again in a moment.");
 }

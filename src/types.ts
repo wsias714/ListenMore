@@ -64,6 +64,8 @@ export interface LibraryData {
   currentAt?: string;
   /** Shortcut notes that arrived while no book was current. */
   looseNotes?: Note[];
+  /** Shortcut start/finish command files already applied (they are not idempotent like notes). */
+  inboxApplied?: string[];
 }
 
 /** Fields the desktop job drafts. All optional: it only fills what the notes support. */
