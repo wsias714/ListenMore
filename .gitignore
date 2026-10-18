@@ -25,3 +25,8 @@ dist-artifact
 *.sw?
 .local/
 __pycache__/
+
+# local tooling
+.claude/
+.idea/
+.pytest_cache/
