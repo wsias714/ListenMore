@@ -1,22 +1,32 @@
 #!/usr/bin/env python3
-"""Weekly "insights from past books" for Bench's Saturday morning briefing.
+"""Weekly "insights from a past book" for Bench's Saturday morning briefing.
 
-Picks books the way the app's weekly review does (least-recently-reviewed half, then
-random; seeded by ISO week so reruns agree), has Haiku write one line each from Wade's
-own stored fields, and writes ~/.local/state/listenmore/book-insights.json:
+Picks ONE book the way the app's weekly review does (least-recently-reviewed half, then
+random; seeded by ISO week so reruns agree), has Haiku write a short piece from Wade's
+own stored fields plus a titles-only digest of his week (Bench items closed, Sunday-plan
+re-kicks, slipped items), and writes
+~/.local/state/listenmore/book-insights.json:
 
-  {"for_day": "2026-10-17", "generated": "...", "lines": ["Title: ...", ...]}
+  {"for_day": "2026-10-17", "generated": "...", "books": ["id"], "book": "Title by Author",
+   "quotes": ["verbatim from his notes", ...], "ideas": "one paragraph",
+   "your_week": "applied insight", "your_week_kind": "week" | "evergreen"}
+
+Quotes are kept only if they appear verbatim in the book's stored fields (checked here, not
+trusted from the model). With no week digest the model gives an evergreen structural lesson
+instead (never skipped). If the model is unavailable the file carries plain "lines" built from the
+stored thesis/application instead, which Bench still reads.
 
 Only generates on Fri/Sat, and only if that Saturday's file is missing, so the nightly
-timer can call it every night and it costs one Haiku call a week. Falls back to plain
-lines built from the stored thesis/application if the model is unavailable.
+timer can call it every night and it costs one Haiku call a week.
 
   insights.py [--force] [--dry-run]
 """
 from __future__ import annotations
 
 import json
+import os
 import random
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -27,7 +37,11 @@ import lm_common as lm  # noqa: E402
 
 PROMPT = Path(__file__).resolve().parent / 'prompts' / 'insights.md'
 OUT = lm.STATE / 'book-insights.json'
-HOW_MANY = 3
+HOW_MANY = 1
+DAILY_DIR = Path(os.environ.get('HK_DAILY_DIR') or Path.home() / 'Projects' / 'ai-housekeeping' / 'runs' / 'daily')
+BENCH_DB = Path(os.environ.get('BENCH_DB') or Path.home() / 'Projects' / 'bench' / 'bench.db')
+WEEKPLAN_DIR = Path(os.environ.get('BENCH_WEEKPLAN_DIR') or Path.home() / 'Projects' / 'bench' / 'cache' / 'weekplan')
+DIGEST_MAX = 1500
 
 
 def target_saturday(today: date) -> date:
@@ -72,6 +86,98 @@ def fallback_lines(chosen: list[dict]) -> list[str]:
     return lines
 
 
+def _clip(s: str, n: int = 160) -> str:
+    s = ' '.join(str(s).split())
+    return s if len(s) <= n else s[:n - 1].rstrip() + '…'
+
+
+def _closed_titles(days: list[str], db: Path) -> list[str]:
+    """Titles of Bench items marked done in the window (calendar_events.last_completed)."""
+    import sqlite3
+    try:
+        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=2)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = con.execute(
+            "SELECT title, substr(last_completed, 1, 10) FROM calendar_events "
+            "WHERE substr(last_completed, 1, 10) BETWEEN ? AND ? ORDER BY last_completed",
+            (days[0], days[-1])).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
+    return [f'{d}: closed Bench item: ' + _clip(t, 120) for t, d in rows if t]
+
+
+def _rekick_titles(days: list[str], plan_dir: Path) -> list[str]:
+    """Titles under '## ... Re-kicks' in the Sunday plan drafts dated inside the window."""
+    out: list[str] = []
+    for day in days:
+        try:
+            text = (plan_dir / f'{day}.md').read_text(encoding='utf-8', errors='replace')
+        except OSError:
+            continue
+        in_sec = False
+        for line in text.splitlines():
+            if line.startswith('## '):
+                in_sec = 're-kick' in line.lower()
+            elif in_sec:
+                m = re.match(r'- \*\*(.+?)\*\*', line)        # top-level bullet, bold title only
+                if m:
+                    out.append(f'{day}: Sunday plan re-kick: ' + _clip(m.group(1), 120))
+    return out
+
+
+def _slipped_titles(days: list[str], daily_dir: Path) -> list[str]:
+    out: list[str] = []
+    try:
+        lines = (daily_dir / 'slipped.jsonl').read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get('date') in days and r.get('title'):
+            out.append(f"{r['date']}: slipped Bench item: " + _clip(r['title'], 120))
+    return out
+
+
+def week_digest(sat: date, daily_dir: Path | None = None, db: Path | None = None,
+                plan_dir: Path | None = None) -> str:
+    """Titles-only digest of the 7 days ending `sat`: Bench items closed, the Sunday plan's re-kicks
+    and items that slipped. No friction text, evidence, amounts or notes. Capped at DIGEST_MAX;
+    '' when nothing is found (the caller then asks for an evergreen lesson)."""
+    days = [(sat - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    items = (_closed_titles(days, db or BENCH_DB) + _rekick_titles(days, plan_dir or WEEKPLAN_DIR)
+             + _slipped_titles(days, daily_dir or DAILY_DIR))
+    out, size = [], 0
+    for it in dict.fromkeys(items):
+        if size + len(it) + 1 > DIGEST_MAX:
+            break
+        out.append(it)
+        size += len(it) + 1
+    return '\n'.join(out)
+
+
+def _norm(s: str) -> str:
+    return ' '.join(str(s).split()).strip(' "\'“”‘’').lower()
+
+
+def verified_quotes(quotes, brief_obj: dict) -> list[str]:
+    """Only quotes that appear verbatim (whitespace/case-insensitive) in the book's stored fields."""
+    hay = _norm(json.dumps(brief_obj, ensure_ascii=False))
+    hay = hay.replace('\\"', '"')
+    out = []
+    for q in quotes if isinstance(quotes, list) else []:
+        n = _norm(q)
+        if len(n) >= 8 and n in hay and ' '.join(str(q).split()) not in out:
+            out.append(' '.join(str(q).split()))
+    return out[:3]
+
+
 def generate(today: date, dry: bool = False, force: bool = False) -> dict:
     sat = target_saturday(today)
     if not force and today.weekday() not in (4, 5):
@@ -97,23 +203,31 @@ def generate(today: date, dry: bool = False, force: bool = False) -> dict:
         return {'ok': True, 'skipped': 'no finished books'}
 
     chosen = pick(books, sat)
-    lines: list[str] = []
+    b = chosen[0]
+    bf = brief(b, today)
+    digest = week_digest(sat)
+    kind = 'week' if digest else 'evergreen'
+    title = b['title'] + (f" by {b['author']}" if b.get('author') else '')
+    payload = {'for_day': sat.isoformat(), 'generated': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+               'books': [x['id'] for x in chosen]}
+    out = None
     if not dry:
         prompt = Template(PROMPT.read_text(encoding='utf-8')).safe_substitute(
-            books=json.dumps([brief(b, today) for b in chosen], ensure_ascii=False))
+            book=json.dumps(bf, ensure_ascii=False),
+            week=digest or '(no record of his week is available: give an evergreen structural lesson)')
         out = lm.run_json(prompt, label='insights')
-        if isinstance(out, dict) and isinstance(out.get('lines'), list):
-            lines = [' '.join(str(x).split()) for x in out['lines'] if str(x).strip()][:HOW_MANY + 1]
-    if not lines:
-        lines = fallback_lines(chosen)
-    payload = {'for_day': sat.isoformat(), 'generated': datetime.now(timezone.utc).isoformat(timespec='seconds'),
-               'books': [b['id'] for b in chosen], 'lines': lines}
+    ideas = ' '.join(str(out.get('ideas', '')).split()) if isinstance(out, dict) else ''
+    if ideas:
+        payload.update(book=title, quotes=verified_quotes(out.get('quotes'), bf), ideas=ideas,
+                       your_week=' '.join(str(out.get('your_week', '')).split()), your_week_kind=kind)
+    else:
+        payload['lines'] = fallback_lines(chosen)
     if not dry:
         OUT.parent.mkdir(parents=True, exist_ok=True)
         tmp = OUT.with_suffix('.tmp')
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
         tmp.replace(OUT)
-    lm.log('insights', for_day=sat.isoformat(), lines=len(lines), dry=dry)
+    lm.log('insights', for_day=sat.isoformat(), quotes=len(payload.get('quotes', [])), kind=kind, dry=dry)
     return {'ok': True, **payload}
 
 
