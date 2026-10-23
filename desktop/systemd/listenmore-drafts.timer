@@ -1,8 +1,9 @@
 [Unit]
-Description=ListenMore daily check, 02:30 (drafts only when a book was finished)
+Description=ListenMore daily check, 03:05 (drafts only when a book was finished)
 
 [Timer]
-OnCalendar=*-*-* 02:30:00
+# 03:05, after the TWM cycle's 23:00-03:00 window (Wade, 2026-10-23: no other models in that window)
+OnCalendar=*-*-* 03:05:00
 Persistent=true
 
 [Install]
