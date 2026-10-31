@@ -4,10 +4,14 @@ import { ConflictError } from "./lib/remote";
 
 /** In-app Feedback button (shared module, see ~/Projects/_shared/feedback). Items go to Dropbox
     Apps/ListenMore/feedback/ using the same sign-in as sync; offline or signed out, they wait on the device. */
+let handle: { open: () => void } | null = null;
+/** Opens the feedback panel. The button lives in Settings rather than floating on screen. */
+export const openFeedback = () => handle?.open();
+
 export function startFeedback() {
-  initFeedback({
+  handle = initFeedback({
     app: "listenmore",
-    bottom: 76,
+    fab: false,
     upload: async (item) => {
       if (!isConnected()) throw new Error("not connected to Dropbox");
       try {

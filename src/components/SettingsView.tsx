@@ -4,6 +4,7 @@ import { fmtStamp } from "../lib/library";
 import { disconnect, finishAuthWithCode, getAppKey, getRefreshToken, redirectUri, setAppKey, startAuth } from "../lib/dropbox";
 import type { Sync } from "../lib/useSync";
 import { Btn, Input, Label } from "./atoms";
+import { openFeedback } from "../feedback";
 
 const card: React.CSSProperties = { background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: 18, marginTop: 14 };
 const code: React.CSSProperties = { font: `400 12px/1.5 ${mono}`, color: C.text, background: C.bg, padding: "8px 10px", borderRadius: 6, wordBreak: "break-all" };
@@ -66,6 +67,14 @@ export function SettingsView({
   return (
     <div style={{ paddingTop: 26 }}>
       <Btn kind="quiet" onClick={onBack}>← Back</Btn>
+
+      <div style={card}>
+        <div style={{ ...h, fontSize: 24 }}>Feedback</div>
+        <p style={{ color: C.muted, marginTop: 6, font: `400 14px/1.55 ${body}` }}>
+          Something broken, or an idea? It goes to Wade's list and is looked at the next day.
+        </p>
+        <Btn kind="solid" onClick={openFeedback}>Send feedback</Btn>
+      </div>
 
       <div style={card}>
         <div style={{ ...h, fontSize: 24 }}>Dropbox</div>
